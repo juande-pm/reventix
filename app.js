@@ -303,7 +303,7 @@ function vistaAjustes() {
     <label>Proveedor</label><select id="sProv"><option value="gemini" ${s.provider === 'gemini' ? 'selected' : ''}>Google Gemini (tiene capa gratuita)</option><option value="anthropic" ${s.provider === 'anthropic' ? 'selected' : ''}>Claude (Anthropic API, de pago)</option></select>
     <label>Clave de API</label><input type="text" id="sKey" value="${esc(s.apiKey)}" placeholder="Pega aquí tu clave" autocomplete="off">
     <label>Modelo</label><input type="text" id="sModel" value="${esc(s.model)}">
-    <p class="note">La clave se guarda solo en este dispositivo y se envía directamente al proveedor. No la compartas. Si el modelo deja de existir, cambia aquí su nombre (ejemplos: gemini-2.5-flash, claude-haiku-5-5).</p>
+    <p class="note">La clave se guarda solo en este dispositivo y se envía directamente al proveedor. No la compartas. Si el modelo deja de existir, cambia aquí su nombre (ejemplos: gemini-3.8-flash, claude-haiku-5-5).</p>
     <div class="row"><button class="btn primary" data-act="saveset">Guardar ajustes</button></div></div>
     <div class="card"><h3 style="margin-top:0">Copia de seguridad</h3>
     <p class="note">Tus datos y fotos viven en este navegador. Si borras los datos del navegador o cambias de móvil, se pierden. Haz copias a menudo.</p>
