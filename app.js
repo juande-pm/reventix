@@ -45,6 +45,15 @@ async function dbDel(id) {
   return new Promise((res, rej) => { const t = d.transaction(STORE, 'readwrite'); t.objectStore(STORE).delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); });
 }
 
+async function dbGet(id) {
+  const d = await db();
+  return new Promise((res, rej) => { const q = d.transaction(STORE).objectStore(STORE).get(id); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+}
+async function dbClear() {
+  const d = await db();
+  return new Promise((res, rej) => { const t = d.transaction(STORE, 'readwrite'); t.objectStore(STORE).clear(); t.oncomplete = res; t.onerror = () => rej(t.error); });
+}
+
 /* ========= Ajustes ========= */
 const DEF = { provider: 'gemini', apiKey: '', model: 'gemini-2.5-flash', margen: 100 };
 function settings() { try { return { ...DEF, ...JSON.parse(localStorage.getItem('rv_settings') || '{}') }; } catch { return { ...DEF }; } }
@@ -151,13 +160,17 @@ async function generarConIA(fotos, ctx) {
 /* ========= Render principal ========= */
 function destruirCharts() { charts.forEach(c => c.destroy()); charts = []; }
 
+function pintarTop() {
+  const stock = negocio().filter(i => i.status === 'stock' || i.status === 'publicado').length;
+  const nube = sb ? ` · ☁ ${cloudUser ? (syncMsg || 'conectado') : 'sin sesión'}` : '';
+  $('#topInfo').textContent = `${items.length} prendas · ${stock} a la venta${nube}`;
+}
+
 function render() {
   destruirCharts();
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('#fab').classList.toggle('hidden', tab === 'set');
-  const nb = negocio();
-  const stock = nb.filter(i => i.status === 'stock' || i.status === 'publicado').length;
-  $('#topInfo').textContent = `${items.length} prendas · ${stock} a la venta`;
+  pintarTop();
   const v = $('#view');
   if (tab === 'inv') v.innerHTML = vistaInventario();
   else if (tab === 'stats') { v.innerHTML = vistaStats(); pintarCharts(); }
@@ -270,9 +283,23 @@ function vistaCalendario() {
 }
 
 /* ---- Ajustes ---- */
+function cardCuenta() {
+  const t = '<h3 style="margin-top:0">Cuenta y sincronización</h3>';
+  if (!CFG.SUPABASE_URL || !CFG.SUPABASE_KEY) return `<div class="card">${t}<p class="note">La nube aún no está configurada. Rellena el archivo <b>config.js</b> con los datos de tu proyecto de Supabase y vuelve a subirlo. Mientras tanto la app funciona solo en este dispositivo.</p></div>`;
+  if (!sb) return `<div class="card">${t}<p class="note">No se pudo cargar la librería de la nube (¿sin conexión?). Recarga la página con internet.</p></div>`;
+  if (!cloudUser) return `<div class="card">${t}<p class="note">Entra con tu cuenta para que tus prendas y fotos se guarden en la nube y salgan igual en el móvil y en el ordenador.</p>
+    <label>Email</label><input type="text" id="aEmail" inputmode="email" autocapitalize="off" autocomplete="username">
+    <label>Contraseña (mínimo 6 caracteres)</label><input type="password" id="aPass" autocomplete="current-password" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--card)">
+    <div class="row"><button class="btn primary" data-act="signin">Entrar</button><button class="btn" data-act="signup">Crear cuenta</button></div></div>`;
+  return `<div class="card">${t}<p class="note">Sesión iniciada como <b>${esc(cloudUser.email || '')}</b></p>
+    <p class="note" id="syncEstado">${esc(syncMsg)}</p>
+    <div class="row"><button class="btn primary" data-act="syncnow">Sincronizar ahora</button><button class="btn" data-act="signout">Cerrar sesión</button></div>
+    <p class="note">La clave de la IA no se sincroniza: tendrás que ponerla en cada dispositivo.</p></div>`;
+}
+
 function vistaAjustes() {
   const s = settings();
-  return `<div class="card"><h3 style="margin-top:0">Conexión con la IA</h3>
+  return cardCuenta() + `<div class="card"><h3 style="margin-top:0">Conexión con la IA</h3>
     <label>Proveedor</label><select id="sProv"><option value="gemini" ${s.provider === 'gemini' ? 'selected' : ''}>Google Gemini (tiene capa gratuita)</option><option value="anthropic" ${s.provider === 'anthropic' ? 'selected' : ''}>Claude (Anthropic API, de pago)</option></select>
     <label>Clave de API</label><input type="text" id="sKey" value="${esc(s.apiKey)}" placeholder="Pega aquí tu clave" autocomplete="off">
     <label>Modelo</label><input type="text" id="sModel" value="${esc(s.model)}">
@@ -337,7 +364,8 @@ async function guardarForm(id) {
     title: g('title'), description: g('description'), brand: g('brand'), size: g('size'), category: g('category'), condition: g('condition'),
     origin: g('origin'), lot: g('lot'), buyPrice: num(g('buyPrice')), buyShip: num(g('buyShip')), dateBought: g('dateBought'),
     personal: f.get('personal') === 'on', status: g('status'), notes: g('notes'),
-    sellPrice: num(g('sellPrice')), sellFees: num(g('sellFees')), dateSold: g('dateSold'), datePublished: prev?.datePublished || ''
+    sellPrice: num(g('sellPrice')), sellFees: num(g('sellFees')), dateSold: g('dateSold'), datePublished: prev?.datePublished || '',
+    updatedAt: Date.now(), photoPaths: prev?.photoPaths || []
   };
   if (it.status === 'vendido' && !it.dateSold) it.dateSold = today();
   if (it.status === 'publicado' && !it.datePublished) it.datePublished = today();
@@ -346,6 +374,7 @@ async function guardarForm(id) {
   const k = items.findIndex(x => x.id === it.id);
   if (k >= 0) items[k] = it; else items.push(it);
   cerrarForm(); render(); toast('Guardado');
+  cloudSync();
 }
 function cerrarForm() { $('#sheet').classList.add('hidden'); $('#sheet').innerHTML = ''; }
 
@@ -406,9 +435,137 @@ async function importarJSON(file) {
   try {
     const j = JSON.parse(await file.text());
     if (!Array.isArray(j.items)) throw new Error();
-    for (const it of j.items) { if (!it.id) it.id = uid(); await dbPut(it); }
-    items = await dbAll(); render(); toast(`Restauradas ${j.items.length} prendas`);
+    for (const it of j.items) { if (!it.id) it.id = uid(); it.updatedAt = Date.now(); it.photoPaths = []; delete it.deleted; await dbPut(it); }
+    items = (await dbAll()).filter(i => !i.deleted); render(); toast(`Restauradas ${j.items.length} prendas`);
+    cloudSync();
   } catch { toast('Archivo de copia no válido'); }
+}
+
+/* ========= Nube (Supabase): cuentas y sincronización ========= */
+/* Cada prenda se guarda como una fila (campos) + fotos en un almacén privado.
+   Gana siempre la versión más reciente (updatedAt). Los borrados se propagan con "lápidas" (deleted:true). */
+const CFG = window.REVENTIX_CONFIG || {};
+let sb = null, cloudUser = null, syncing = false, syncAgain = false, syncMsg = '';
+
+function initCloud() {
+  if (!CFG.SUPABASE_URL || !CFG.SUPABASE_KEY || !window.supabase) return;
+  try { sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY); } catch { sb = null; return; }
+  sb.auth.getSession().then(({ data }) => {
+    cloudUser = data?.session?.user || null;
+    pintarTop(); if (tab === 'set') render();
+    if (cloudUser) cloudSync();
+  });
+  sb.auth.onAuthStateChange((ev, session) => {
+    cloudUser = session?.user || null;
+    if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') setTimeout(() => { render(); cloudSync(); }, 0);
+  });
+}
+
+function hashFoto(dataUrl) { // hash del contenido de la foto (sin la cabecera data:)
+  const s = dataUrl.split(',')[1] || dataUrl; let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(16) + '-' + s.length.toString(16);
+}
+async function dataABlob(d) { return (await fetch(d)).blob(); }
+function blobAData(b) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); }); }
+
+async function pushItem(it) {
+  const bucket = sb.storage.from('photos');
+  if (it.deleted) {
+    const old = it.photoPaths || [];
+    if (old.length) await bucket.remove(old);
+    const { error } = await sb.from('items').upsert({ id: it.id, data: {}, photo_paths: [], updated_at: it.updatedAt, deleted: true });
+    if (error) throw error;
+    const cur = await dbGet(it.id);
+    if (cur && cur.updatedAt === it.updatedAt) { cur.photoPaths = []; await dbPut(cur); }
+    return;
+  }
+  const fotos = it.photos || [];
+  const paths = fotos.map(p => `${cloudUser.id}/${it.id}/${hashFoto(p)}.jpg`);
+  const old = it.photoPaths || [];
+  for (let k = 0; k < fotos.length; k++) {
+    if (old.includes(paths[k])) continue;
+    const { error } = await bucket.upload(paths[k], await dataABlob(fotos[k]), { upsert: true, contentType: 'image/jpeg' });
+    if (error) throw error;
+  }
+  const sobran = old.filter(p => !paths.includes(p));
+  if (sobran.length) await bucket.remove(sobran);
+  const { photos: _f, photoPaths: _p, ...data } = it;
+  const { error } = await sb.from('items').upsert({ id: it.id, data, photo_paths: paths, updated_at: it.updatedAt, deleted: false });
+  if (error) throw error;
+  const cur = await dbGet(it.id); // por si se editó mientras subíamos: solo actualizamos si sigue siendo la misma versión
+  if (cur && cur.updatedAt === it.updatedAt) { cur.photoPaths = paths; await dbPut(cur); }
+}
+
+async function pullItem(id) {
+  const { data: row, error } = await sb.from('items').select('*').eq('id', id).single();
+  if (error) throw error;
+  const loc = await dbGet(id);
+  if (row.deleted) {
+    if (loc) await dbPut({ id, deleted: true, updatedAt: row.updated_at, photos: [], photoPaths: [] });
+    return;
+  }
+  const fotos = [], ok = [];
+  for (const p of row.photo_paths || []) {
+    const k = loc?.photoPaths ? loc.photoPaths.indexOf(p) : -1;
+    if (k >= 0 && loc.photos?.[k]) { fotos.push(loc.photos[k]); ok.push(p); continue; }
+    const { data: blob, error: e2 } = await sb.storage.from('photos').download(p);
+    if (e2 || !blob) continue;
+    fotos.push(await blobAData(blob)); ok.push(p);
+  }
+  await dbPut({ ...row.data, id, photos: fotos, photoPaths: ok, updatedAt: row.updated_at, deleted: false });
+}
+
+function setSync(m) { syncMsg = m; pintarTop(); if (tab === 'set') { const n = $('#syncEstado'); if (n) n.textContent = m; } }
+
+async function cloudSync(manual = false) {
+  if (!sb || !cloudUser) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; setSync('Sincronizando…');
+  let cambios = 0;
+  try {
+    const { data: remoto, error } = await sb.from('items').select('id,updated_at,deleted');
+    if (error) throw error;
+    const rmap = new Map(remoto.map(r => [r.id, r]));
+    const local = await dbAll();
+    const lmap = new Map(local.map(l => [l.id, l]));
+    const aBajar = remoto.filter(r => { const l = lmap.get(r.id); return l ? r.updated_at > l.updatedAt : !r.deleted; });
+    const aSubir = local.filter(l => { const r = rmap.get(l.id); return r ? l.updatedAt > r.updated_at : !l.deleted; });
+    for (const l of aSubir) { await pushItem(l); cambios++; }
+    for (const r of aBajar) { await pullItem(r.id); cambios++; }
+    items = (await dbAll()).filter(i => !i.deleted);
+    setSync('Sincronizado ' + new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }));
+    if (cambios) render();
+    if (manual) toast(cambios ? `Sincronizado (${cambios} cambios)` : 'Todo está al día');
+  } catch (e) {
+    setSync('Error al sincronizar');
+    if (manual) toast('No se pudo sincronizar: ' + (e.message || 'error de red'));
+  } finally {
+    syncing = false;
+    if (syncAgain) { syncAgain = false; cloudSync(); }
+  }
+}
+
+async function cuenta(modo) {
+  const email = ($('#aEmail')?.value || '').trim(), pass = $('#aPass')?.value || '';
+  if (!email || pass.length < 6) { toast('Pon tu email y una contraseña de al menos 6 caracteres'); return; }
+  try {
+    if (modo === 'signup') {
+      const { data, error } = await sb.auth.signUp({ email, password: pass });
+      if (error) throw error;
+      toast(data.session ? 'Cuenta creada' : 'Cuenta creada. Confirma tu email y luego entra.');
+    } else {
+      const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+      if (error) throw error;
+    }
+  } catch (e) { toast(e.message || 'Error de cuenta'); }
+}
+async function cerrarSesion() {
+  await cloudSync(); // sube lo pendiente antes de salir
+  const borrar = confirm('¿Quieres borrar también los datos de ESTE dispositivo? Seguirán guardados en la nube. Pulsa Cancelar para conservarlos aquí.');
+  await sb.auth.signOut();
+  if (borrar) { await dbClear(); items = []; }
+  render();
 }
 
 /* ========= Eventos ========= */
@@ -430,8 +587,15 @@ document.addEventListener('click', async e => {
   }
   else if (a === 'borrar') {
     if (!confirm('¿Eliminar esta prenda y sus fotos? No se puede deshacer.')) return;
-    await dbDel(el.dataset.id); items = items.filter(x => x.id !== el.dataset.id); cerrarForm(); render(); toast('Eliminada');
+    const id = el.dataset.id, viejo = items.find(x => x.id === id);
+    // Se deja una "lápida" para que el borrado llegue también a los demás dispositivos
+    await dbPut({ id, deleted: true, updatedAt: Date.now(), photos: [], photoPaths: viejo?.photoPaths || [] });
+    items = items.filter(x => x.id !== id); cerrarForm(); render(); toast('Eliminada');
+    cloudSync();
   }
+  else if (a === 'signin' || a === 'signup') cuenta(a);
+  else if (a === 'signout') cerrarSesion();
+  else if (a === 'syncnow') cloudSync(true);
   else if (a === 'mes') { calMes.setMonth(calMes.getMonth() + +el.dataset.v); calSel = null; render(); }
   else if (a === 'dia') { calSel = el.dataset.f; render(); }
   else if (a === 'xlsx') exportarExcel();
@@ -459,9 +623,15 @@ document.addEventListener('change', e => {
 
 /* ========= Arranque ========= */
 (async function init() {
-  try { items = await dbAll(); } catch { toast('No se pudo abrir el almacenamiento del navegador'); }
-  if (!settings().apiKey && !items.length) tab = 'inv';
+  try {
+    const todo = await dbAll();
+    for (const i of todo) if (!i.updatedAt) { i.updatedAt = i.created || Date.now(); await dbPut(i); } // datos de la versión anterior
+    items = todo.filter(i => !i.deleted);
+  } catch { toast('No se pudo abrir el almacenamiento del navegador'); }
+  initCloud();
   render();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') cloudSync(); });
+  window.addEventListener('online', () => cloudSync());
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 })();
