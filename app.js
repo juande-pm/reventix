@@ -449,7 +449,7 @@ function abrirForm(id) {
 }
 function pintarFotos() {
   $('#photos').innerHTML = formPhotos.map((p, k) => `<div class="ph"><img src="${p}" alt="Foto ${k + 1}" data-act="verf" data-k="${k}" style="cursor:zoom-in"><button type="button" class="x" data-act="quitaf" data-k="${k}">×</button></div>`).join('') +
-    (formPhotos.length < 8 ? `<div class="addph" data-act="addcam">📷<br>Cámara</div><div class="addph" data-act="addgal">🖼️<br>Galería</div>` : '');
+    (formPhotos.length < 8 ? `<div class="addph" data-act="addmulti">📸<br>Varias fotos</div><div class="addph" data-act="addcam">📷<br>Cámara</div><div class="addph" data-act="addgal">🖼️<br>Galería</div>` : '');
 }
 async function guardarForm(id) {
   const f = new FormData($('#frm'));
@@ -724,6 +724,69 @@ async function aplicarRecorte() {
 }
 function cancelarRecorte() { if (!crop) return; const k = crop.k; crop = null; abrirVisor(k); }
 
+/* ========= Cámara en directo: varias fotos seguidas ========= */
+let camStream = null, camFacing = 'environment';
+
+function pararStream() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+}
+function cerrarCamara() {
+  pararStream();
+  const c = $('#cam'); if (c) c.remove();
+}
+async function iniciarStream() {
+  pararStream();
+  camStream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: camFacing }, width: { ideal: 1920 }, height: { ideal: 1920 } }
+  });
+  const v = $('#camVideo');
+  if (v) { v.srcObject = camStream; try { await v.play(); } catch { /* algunos navegadores arrancan solos */ } }
+}
+function actualizarCam() {
+  const c = $('#camCount'); if (c) c.textContent = `${formPhotos.length} de 8 fotos`;
+  const l = $('#camLast'); if (l) l.innerHTML = formPhotos.length ? `<img src="${formPhotos[formPhotos.length - 1]}" alt="">` : '';
+}
+async function abrirCamara() {
+  if (formPhotos.length >= 8) { toast('Ya hay 8 fotos (el máximo)'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Tu navegador no permite la cámara en directo. Usa el botón Cámara.'); return; }
+  cerrarCamara();
+  const d = document.createElement('div');
+  d.id = 'cam'; d.className = 'cam';
+  d.innerHTML = `<video id="camVideo" autoplay playsinline muted></video><div class="camflash" id="camFlash"></div>
+    <div class="camtop"><span id="camCount"></span><button type="button" class="btn" data-act="camflip">🔄 Girar cámara</button></div>
+    <div class="cambar"><div class="camlast" id="camLast"></div><button type="button" class="shutter" data-act="camshot" aria-label="Hacer foto"></button><button type="button" class="btn primary" data-act="camdone">Listo</button></div>`;
+  document.body.appendChild(d);
+  actualizarCam();
+  try { await iniciarStream(); }
+  catch (e) {
+    cerrarCamara();
+    toast(e && e.name === 'NotAllowedError'
+      ? 'Permiso de cámara denegado. Actívalo para este sitio en los ajustes del navegador.'
+      : 'No se pudo abrir la cámara. Usa el botón Cámara.');
+  }
+}
+async function girarCamara() {
+  camFacing = camFacing === 'environment' ? 'user' : 'environment';
+  try { await iniciarStream(); } catch { toast('No se pudo cambiar de cámara'); }
+}
+function hacerFoto() {
+  const v = $('#camVideo');
+  if (!v || !v.videoWidth) { toast('La cámara aún no está lista'); return; }
+  if (formPhotos.length >= 8) { toast('Ya hay 8 fotos (el máximo)'); return; }
+  const k = Math.min(1, 1100 / Math.max(v.videoWidth, v.videoHeight)); // mismo tamaño que las demás fotos
+  const c = document.createElement('canvas');
+  c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  formPhotos.push(c.toDataURL('image/jpeg', 0.72));
+  pintarFotos(); actualizarCam();
+  const f = $('#camFlash'); if (f) { f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 120); }
+  if (navigator.vibrate) navigator.vibrate(25);
+  if (formPhotos.length >= 8) { cerrarCamara(); toast('Has llegado a 8 fotos'); }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#cam')) cerrarCamara(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) cerrarCamara(); }); // al salir de la app, se apaga la cámara
+
 /* ========= Nube (Supabase): cuentas y sincronización ========= */
 /* Cada prenda se guarda como una fila (campos) + fotos en un almacén privado.
    Gana siempre la versión más reciente (updatedAt). Los borrados se propagan con "lápidas" (deleted:true). */
@@ -863,6 +926,10 @@ document.addEventListener('click', async e => {
   else if (a === 'edit') abrirForm(el.dataset.id);
   else if (a === 'cerrar') cerrarForm();
   else if (a === 'filtro') { filtro = el.dataset.v; render(); }
+  else if (a === 'addmulti') abrirCamara();
+  else if (a === 'camshot') hacerFoto();
+  else if (a === 'camdone') cerrarCamara();
+  else if (a === 'camflip') girarCamara();
   else if (a === 'addcam') $('#camIn').click();
   else if (a === 'addgal') $('#fileIn').click();
   else if (a === 'quitaf') { formPhotos.splice(+el.dataset.k, 1); pintarFotos(); }

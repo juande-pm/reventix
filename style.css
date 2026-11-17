@@ -82,3 +82,14 @@ canvas{max-width:100%}
 .crop .hd[data-h=tl]{left:-15px;top:-15px}.crop .hd[data-h=tr]{right:-15px;top:-15px}
 .crop .hd[data-h=bl]{left:-15px;bottom:-15px}.crop .hd[data-h=br]{right:-15px;bottom:-15px}
 .lb{overflow-y:auto}
+
+.cam{position:fixed;inset:0;z-index:45;background:#000;display:flex;flex-direction:column}
+.cam video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
+.camtop{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;color:#fff;font-weight:600;background:linear-gradient(rgba(0,0,0,.6),rgba(0,0,0,0))}
+.cambar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px calc(18px + env(safe-area-inset-bottom));background:#000}
+.shutter{width:72px;height:72px;border-radius:50%;border:5px solid #fff;background:rgba(255,255,255,.8);box-shadow:inset 0 0 0 3px #000;padding:0}
+.shutter:active{background:#fff;transform:scale(.94)}
+.camlast{width:64px;height:64px;border-radius:10px;overflow:hidden;background:#222}
+.camlast img{width:100%;height:100%;object-fit:cover;display:block}
+.camflash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .12s}
+.camflash.on{opacity:.7}
