@@ -574,7 +574,7 @@ async function descargarFotos() {
 }
 
 /* Visor a pantalla completa de las fotos de la prenda */
-function cerrarVisor() { const v = $('#lb'); if (v) v.remove(); }
+function cerrarVisor() { crop = null; const v = $('#lb'); if (v) v.remove(); }
 function abrirVisor(k) {
   const n = formPhotos.length;
   if (!(k >= 0 && k < n)) return;
@@ -582,11 +582,12 @@ function abrirVisor(k) {
   const d = document.createElement('div');
   d.id = 'lb'; d.className = 'lb'; d.dataset.k = String(k);
   d.innerHTML = `<img src="${formPhotos[k]}" alt="Foto ${k + 1}"><div class="note" style="color:#ddd">Foto ${k + 1} de ${n}</div>
+    <div class="bar"><button type="button" class="btn" data-act="lbrotl">↺ Girar</button><button type="button" class="btn" data-act="lbrotr">↻ Girar</button><button type="button" class="btn" data-act="lbcrop">✂ Recortar</button></div>
     <div class="bar">${n > 1 ? '<button type="button" class="btn" data-act="lbprev">‹ Anterior</button><button type="button" class="btn" data-act="lbnext">Siguiente ›</button>' : ''}<button type="button" class="btn primary" data-act="lbdl">Descargar esta foto</button><button type="button" class="btn" data-act="lbclose">Cerrar</button></div>`;
   document.body.appendChild(d);
 }
 function visorIr(delta) {
-  const v = $('#lb'); if (!v) return;
+  const v = $('#lb'); if (!v || crop) return;
   const n = formPhotos.length;
   abrirVisor((((+v.dataset.k + delta) % n) + n) % n);
 }
@@ -603,6 +604,125 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') visorIr(1);
   else if (e.key === 'ArrowLeft') visorIr(-1);
 });
+
+/* ========= Editar fotos: girar y recortar ========= */
+let crop = null; // { k, r:{x,y,w,h} en fracciones 0..1, ratio:null|número (ancho/alto), W, H (px reales), drag }
+const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
+const cargarImg = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('img')); i.src = src; });
+
+// Mayor rectángulo centrado con la proporción pedida (ancho/alto) dentro de una imagen W×H
+function rectConProporcion(ratio, W, H) {
+  let w = 1, h = (W / ratio) / H;
+  if (h > 1) { h = 1; w = (H * ratio) / W; }
+  return { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
+}
+function mover(r, dx, dy) {
+  return { ...r, x: clamp(r.x + dx, 0, 1 - r.w), y: clamp(r.y + dy, 0, 1 - r.h) };
+}
+// Arrastre de una esquina ('tl','tr','bl','br'). Con ratio, se mantiene la proporción y el borde opuesto queda fijo.
+function redimensionar(r, hd, dx, dy, ratio, W, H) {
+  const MIN = 0.08;
+  let l = r.x, t = r.y, rt = r.x + r.w, b = r.y + r.h;
+  if (hd.includes('l')) l = clamp(l + dx, 0, rt - MIN);
+  if (hd.includes('r')) rt = clamp(rt + dx, l + MIN, 1);
+  if (hd.includes('t')) t = clamp(t + dy, 0, b - MIN);
+  if (hd.includes('b')) b = clamp(b + dy, t + MIN, 1);
+  if (ratio) {
+    let w = rt - l, hh = (w * W) / ratio / H;
+    const fijoArriba = hd.includes('b');
+    const espacio = fijoArriba ? 1 - t : b;
+    if (hh > espacio) { hh = espacio; w = (hh * H * ratio) / W; if (hd.includes('l')) l = rt - w; else rt = l + w; }
+    if (fijoArriba) b = t + hh; else t = b - hh;
+  }
+  return { x: l, y: t, w: rt - l, h: b - t };
+}
+// Rectángulo en píxeles reales, siempre dentro de la imagen
+function rectPixels(r, W, H) {
+  const sx = clamp(Math.round(r.x * W), 0, W - 1), sy = clamp(Math.round(r.y * H), 0, H - 1);
+  return { sx, sy, sw: clamp(Math.round(r.w * W), 1, W - sx), sh: clamp(Math.round(r.h * H), 1, H - sy) };
+}
+
+async function rotarFoto(k, grados) { // grados: 90, -90 o 180
+  if (!formPhotos[k]) return;
+  const img = await cargarImg(formPhotos[k]);
+  const c = document.createElement('canvas');
+  const cuarto = Math.abs(grados) % 180 === 90;
+  c.width = cuarto ? img.height : img.width; c.height = cuarto ? img.width : img.height;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width / 2, c.height / 2); ctx.rotate(grados * Math.PI / 180);
+  ctx.drawImage(img, -img.width / 2, -img.height / 2);
+  formPhotos[k] = c.toDataURL('image/jpeg', 0.85);
+}
+async function recortarFoto(k, r) {
+  if (!formPhotos[k]) return;
+  const img = await cargarImg(formPhotos[k]);
+  const { sx, sy, sw, sh } = rectPixels(r, img.width, img.height);
+  const c = document.createElement('canvas'); c.width = sw; c.height = sh;
+  c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+  formPhotos[k] = c.toDataURL('image/jpeg', 0.85);
+}
+
+async function rotarVisor(g) {
+  const v = $('#lb'); if (!v || crop) return;
+  const k = +v.dataset.k;
+  try { await rotarFoto(k, g); pintarFotos(); abrirVisor(k); toast('Foto girada. Pulsa Guardar en la prenda para conservar el cambio.'); }
+  catch { toast('No se pudo girar la foto'); }
+}
+
+const RATIOS = [['free', 'Libre'], ['1', '1:1'], ['0.8', '4:5'], ['0.75', '3:4'], ['1.3333', '4:3']];
+async function abrirRecorte(k) {
+  if (!formPhotos[k]) return;
+  let img;
+  try { img = await cargarImg(formPhotos[k]); } catch { toast('No se pudo abrir la foto'); return; }
+  const v = $('#lb'); if (!v) return;
+  crop = { k, r: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }, ratio: null, W: img.width, H: img.height, drag: null };
+  v.innerHTML = `<div class="cropwrap"><div class="cropin" id="cropIn"><img id="cropImg" src="${formPhotos[k]}" alt="" draggable="false"><div class="crop" id="cropBox"><i class="hd" data-h="tl"></i><i class="hd" data-h="tr"></i><i class="hd" data-h="bl"></i><i class="hd" data-h="br"></i></div></div></div>
+    <div class="note" style="color:#ddd">Arrastra el recuadro para moverlo y las esquinas para cambiar su tamaño</div>
+    <div class="bar">${RATIOS.map(([val, n]) => `<button type="button" class="chip ${val === 'free' ? 'on' : ''}" data-act="cropr" data-v="${val}">${n}</button>`).join('')}</div>
+    <div class="bar"><button type="button" class="btn primary" data-act="cropok">Aplicar recorte</button><button type="button" class="btn" data-act="cropno">Cancelar</button></div>`;
+  pintarCrop(); enlazarCrop();
+}
+function pintarCrop() {
+  const b = $('#cropBox'); if (!b || !crop) return;
+  const r = crop.r;
+  b.style.left = (r.x * 100) + '%'; b.style.top = (r.y * 100) + '%';
+  b.style.width = (r.w * 100) + '%'; b.style.height = (r.h * 100) + '%';
+}
+function ratioCrop(val) {
+  if (!crop) return;
+  crop.ratio = val === 'free' ? null : +val;
+  if (crop.ratio) {
+    const r = rectConProporcion(crop.ratio, crop.W, crop.H); // y lo reducimos un 10% para que haya margen de movimiento
+    const w = r.w * 0.9, h = r.h * 0.9;
+    crop.r = { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
+  }
+  document.querySelectorAll('[data-act="cropr"]').forEach(bt => bt.classList.toggle('on', bt.dataset.v === val));
+  pintarCrop();
+}
+function enlazarCrop() {
+  const box = $('#cropBox'), area = $('#cropIn'); if (!box || !area) return;
+  box.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    crop.drag = { id: e.pointerId, hd: (e.target.dataset && e.target.dataset.h) || null, x0: e.clientX, y0: e.clientY, r0: { ...crop.r } };
+    try { box.setPointerCapture(e.pointerId); } catch { /* sin captura también funciona */ }
+  });
+  box.addEventListener('pointermove', e => {
+    const d = crop && crop.drag; if (!d || d.id !== e.pointerId) return;
+    const bb = area.getBoundingClientRect();
+    const dx = (e.clientX - d.x0) / bb.width, dy = (e.clientY - d.y0) / bb.height;
+    crop.r = d.hd ? redimensionar(d.r0, d.hd, dx, dy, crop.ratio, crop.W, crop.H) : mover(d.r0, dx, dy);
+    pintarCrop();
+  });
+  const fin = e => { if (crop && crop.drag && crop.drag.id === e.pointerId) crop.drag = null; };
+  box.addEventListener('pointerup', fin); box.addEventListener('pointercancel', fin);
+}
+async function aplicarRecorte() {
+  if (!crop) return;
+  const { k, r } = crop;
+  try { await recortarFoto(k, r); crop = null; pintarFotos(); abrirVisor(k); toast('Foto recortada. Pulsa Guardar en la prenda para conservar el cambio.'); }
+  catch { toast('No se pudo recortar la foto'); }
+}
+function cancelarRecorte() { if (!crop) return; const k = crop.k; crop = null; abrirVisor(k); }
 
 /* ========= Nube (Supabase): cuentas y sincronización ========= */
 /* Cada prenda se guarda como una fila (campos) + fotos en un almacén privado.
@@ -734,7 +854,7 @@ async function cerrarSesion() {
 
 /* ========= Eventos ========= */
 document.addEventListener('click', async e => {
-  if (e.target.id === 'lb') { cerrarVisor(); return; } // clic en el fondo del visor
+  if (e.target.id === 'lb') { if (!crop) cerrarVisor(); return; } // clic en el fondo del visor
   const tb = e.target.closest('.tabs button');
   if (tb) { tab = tb.dataset.tab; render(); window.scrollTo(0, 0); return; }
   const el = e.target.closest('[data-act]'); if (!el) return;
@@ -754,6 +874,12 @@ document.addEventListener('click', async e => {
   else if (a === 'lbprev') visorIr(-1);
   else if (a === 'lbnext') visorIr(1);
   else if (a === 'lbdl') visorDescargar();
+  else if (a === 'lbrotl') rotarVisor(-90);
+  else if (a === 'lbrotr') rotarVisor(90);
+  else if (a === 'lbcrop') abrirRecorte(+$('#lb').dataset.k);
+  else if (a === 'cropr') ratioCrop(el.dataset.v);
+  else if (a === 'cropok') aplicarRecorte();
+  else if (a === 'cropno') cancelarRecorte();
   else if (a === 'copyt' || a === 'copyd') {
     const v = $('#frm')[a === 'copyt' ? 'title' : 'description'].value;
     try { await navigator.clipboard.writeText(v); toast('Copiado'); } catch { toast('No se pudo copiar'); }

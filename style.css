@@ -73,3 +73,12 @@ h3{margin:16px 0 8px;font-size:16px}
 .lb img{max-width:100%;max-height:72vh;object-fit:contain;border-radius:8px}
 .lb .bar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 canvas{max-width:100%}
+
+.cropwrap{padding:16px;overflow:hidden;line-height:0;max-width:100%;border-radius:8px;touch-action:none;user-select:none;-webkit-user-select:none}
+.cropin{position:relative;display:inline-block}
+.cropwrap img{display:block;max-width:100%;max-height:50vh;border-radius:0;object-fit:contain;pointer-events:none}
+.crop{position:absolute;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.6);touch-action:none;cursor:move}
+.crop .hd{position:absolute;width:30px;height:30px;background:#fff;border:3px solid var(--accent);border-radius:50%;touch-action:none}
+.crop .hd[data-h=tl]{left:-15px;top:-15px}.crop .hd[data-h=tr]{right:-15px;top:-15px}
+.crop .hd[data-h=bl]{left:-15px;bottom:-15px}.crop .hd[data-h=br]{right:-15px;bottom:-15px}
+.lb{overflow-y:auto}
