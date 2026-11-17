@@ -69,4 +69,7 @@ th{color:var(--muted);font-weight:600}
 .note{font-size:13px;color:var(--muted)}
 .hint{font-size:13px;background:color-mix(in srgb,var(--warn) 14%,var(--card));border:1px solid var(--warn);border-radius:10px;padding:8px 10px;margin-top:8px}
 h3{margin:16px 0 8px;font-size:16px}
+.lb{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px}
+.lb img{max-width:100%;max-height:72vh;object-fit:contain;border-radius:8px}
+.lb .bar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 canvas{max-width:100%}

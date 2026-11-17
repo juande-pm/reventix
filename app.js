@@ -55,7 +55,7 @@ async function dbClear() {
 }
 
 /* ========= Ajustes ========= */
-const DEF = { provider: 'gemini', apiKey: '', model: 'gemini-2.5-flash', margen: 100 };
+const DEF = { provider: 'gemini', apiKey: '', model: 'gemini-3.8-flash', margen: 100 };
 function settings() { try { return { ...DEF, ...JSON.parse(localStorage.getItem('rv_settings') || '{}') }; } catch { return { ...DEF }; } }
 function saveSettings(s) { localStorage.setItem('rv_settings', JSON.stringify(s)); }
 
@@ -65,6 +65,7 @@ let tab = 'inv';
 let filtro = 'todo';
 let busca = '';
 let calMes = new Date(); calMes.setDate(1);
+let periodo = 'mes', dim = 'mt', orden = 'n';
 let calSel = null;
 let charts = [];
 let formPhotos = [];
@@ -78,8 +79,12 @@ const diasEntre = (a, b) => (a && b) ? Math.round((new Date(b) - new Date(a)) / 
 
 function agrupar(lista, keyFn) {
   const m = new Map();
-  for (const i of lista) { const k = keyFn(i); if (!m.has(k)) m.set(k, []); m.get(k).push(i); }
-  return [...m.entries()].map(([k, arr]) => {
+  for (const i of lista) {
+    const k0 = String(keyFn(i)).trim(), id = k0.toLowerCase();
+    if (!m.has(id)) m.set(id, { k: k0, arr: [] });
+    m.get(id).arr.push(i);
+  }
+  return [...m.values()].map(({ k, arr }) => {
     const n = arr.length;
     const c = arr.reduce((s, i) => s + coste(i), 0);
     const v = arr.reduce((s, i) => s + num(i.sellPrice), 0);
@@ -204,60 +209,147 @@ function vistaInventario() {
 }
 
 /* ---- Estadísticas ---- */
-function vistaStats() {
-  const nb = negocio(), vd = vendidas();
-  const invertido = nb.filter(i => i.status !== 'camino' || true).reduce((s, i) => s + coste(i), 0);
+const PERIODOS = [['mes', 'Este mes'], ['ant', 'Mes anterior'], ['3m', '3 meses'], ['anio', 'Este año'], ['todo', 'Todo']];
+const DIMS = [['mt', 'Marca y talla'], ['talla', 'Talla'], ['cat', 'Tipo de prenda'], ['marca', 'Marca'], ['origen', 'Origen'], ['estado', 'Estado'], ['lote', 'Lote']];
+const ORDENES = [['n', 'Más vendidas'], ['benMedio', 'Beneficio medio'], ['benTotal', 'Beneficio total'], ['roi', 'ROI'], ['dias', 'Más rápidas']];
+const RE_MES = /^\d{4}-\d{2}$/;
+
+function rangoPeriodo(p, ref = new Date()) {
+  const y = ref.getFullYear(), m = ref.getMonth();
+  const ini = (yy, mm) => `${yy}-${pad(mm + 1)}-01`;
+  const fin = (yy, mm) => ymd(new Date(yy, mm + 1, 0));
+  if (p === 'todo') return { d: '', h: '', todo: true, unMes: false, etiqueta: 'Todo el histórico' };
+  if (p === 'anio') return { d: `${y}-01-01`, h: `${y}-12-31`, todo: false, unMes: false, etiqueta: `Año ${y}` };
+  if (p === '3m') {
+    const s = new Date(y, m - 2, 1);
+    return { d: ini(s.getFullYear(), s.getMonth()), h: fin(y, m), todo: false, unMes: false, etiqueta: 'Últimos 3 meses' };
+  }
+  let yy = y, mm = m;
+  if (p === 'ant') { const s = new Date(y, m - 1, 1); yy = s.getFullYear(); mm = s.getMonth(); }
+  else if (RE_MES.test(p)) { yy = +p.slice(0, 4); mm = +p.slice(5) - 1; }
+  return { d: ini(yy, mm), h: fin(yy, mm), todo: false, unMes: true, y: yy, m: mm, etiqueta: `${MESES[mm]} ${yy}` };
+}
+
+let statsCache = null;
+function calcStats() {
+  const R = rangoPeriodo(periodo);
+  const en = f => R.todo || (!!f && f >= R.d && f <= R.h);
+  const compras = negocio().filter(i => en(i.dateBought));
+  const vd = vendidas().filter(i => en(i.dateSold));
+  const invertido = compras.reduce((s, i) => s + coste(i), 0);
   const ingresos = vd.reduce((s, i) => s + num(i.sellPrice) - num(i.sellFees), 0);
-  const costeVendidas = vd.reduce((s, i) => s + coste(i), 0);
-  const benVendidas = ingresos - costeVendidas;
-  const enStockCoste = nb.filter(i => i.status !== 'vendido').reduce((s, i) => s + coste(i), 0);
-  const balance = ingresos - invertido;
-  const roi = costeVendidas > 0 ? (benVendidas / costeVendidas) * 100 : 0;
+  const costeVend = vd.reduce((s, i) => s + coste(i), 0);
+  const ben = ingresos - costeVend;
+  const stockCoste = negocio().filter(i => i.status !== 'vendido').reduce((s, i) => s + coste(i), 0);
+  const dias = vd.map(i => diasEntre(i.dateBought, i.dateSold)).filter(d => d !== null && d >= 0);
+  return {
+    R, compras, vd, invertido, ingresos, costeVend, ben, stockCoste,
+    balance: ingresos - invertido,
+    roi: costeVend > 0 ? (ben / costeVend) * 100 : 0,
+    diasMedios: dias.length ? dias.reduce((a, b) => a + b, 0) / dias.length : null
+  };
+}
+
+function serieTemporal(S) {
+  const R = S.R; let keys, labels, keyOf;
+  if (R.unMes) {
+    const n = new Date(R.y, R.m + 1, 0).getDate();
+    keys = Array.from({ length: n }, (_, k) => `${R.y}-${pad(R.m + 1)}-${pad(k + 1)}`);
+    labels = keys.map((_, k) => String(k + 1)); keyOf = f => f;
+  } else {
+    const set = new Set();
+    S.compras.forEach(i => i.dateBought && set.add(i.dateBought.slice(0, 7)));
+    S.vd.forEach(i => i.dateSold && set.add(i.dateSold.slice(0, 7)));
+    keys = [...set].sort();
+    labels = keys.map(k => `${MESES[+k.slice(5) - 1].slice(0, 3)} ${k.slice(0, 4)}`);
+    keyOf = f => f.slice(0, 7);
+  }
+  const g = new Map(keys.map(k => [k, { g: 0, i: 0 }]));
+  S.compras.forEach(i => { if (i.dateBought && g.has(keyOf(i.dateBought))) g.get(keyOf(i.dateBought)).g += coste(i); });
+  S.vd.forEach(i => { if (i.dateSold && g.has(keyOf(i.dateSold))) g.get(keyOf(i.dateSold)).i += num(i.sellPrice) - num(i.sellFees); });
+  return { labels, gasto: keys.map(k => +g.get(k).g.toFixed(2)), ingresos: keys.map(k => +g.get(k).i.toFixed(2)), por: R.unMes ? 'día' : 'mes' };
+}
+
+function gruposDim(S) {
+  const f = {
+    mt: i => `${i.brand || 'Sin marca'} · ${i.size || '–'}`,
+    talla: i => i.size || 'Sin talla',
+    cat: i => i.category || 'Sin tipo',
+    marca: i => i.brand || 'Sin marca',
+    origen: i => i.origin || 'Sin origen',
+    estado: i => i.condition || '–',
+    lote: i => i.lot
+  }[dim] || (i => i.brand || 'Sin marca');
+  const base = dim === 'lote' ? S.vd.filter(i => i.lot) : S.vd;
+  const ord = {
+    n: (a, b) => b.n - a.n || b.benTotal - a.benTotal,
+    benMedio: (a, b) => b.benMedio - a.benMedio,
+    benTotal: (a, b) => b.benTotal - a.benTotal,
+    roi: (a, b) => b.roi - a.roi,
+    dias: (a, b) => (a.dias ?? 1e9) - (b.dias ?? 1e9)
+  }[orden] || ((a, b) => b.n - a.n);
+  return agrupar(base, f).sort(ord);
+}
+
+const chipsHtml = (lista, actual, act) => lista.map(([k, n]) => `<button class="chip ${actual === k ? 'on' : ''}" data-act="${act}" data-v="${k}">${n}</button>`).join('');
+
+function vistaStats() {
+  const S = statsCache = calcStats();
+  const R = S.R;
   const kpi = (t, v, cls = '') => `<div class="kpi"><small>${t}</small><b class="${cls}">${v}</b></div>`;
-  const filas = arr => arr.map(g => `<tr><td>${esc(g.k)}</td><td>${g.n}</td><td>${eur(g.costeMedio)}</td><td>${eur(g.ventaMedia)}</td><td class="${g.benMedio >= 0 ? 'pos' : 'neg'}">${eur(g.benMedio)}</td><td>${g.roi.toFixed(0)}%</td><td>${g.dias === null ? '–' : g.dias.toFixed(0)}</td></tr>`).join('');
-  const cab = p => `<thead><tr><th>${p}</th><th>Vend.</th><th>Coste m.</th><th>Venta m.</th><th>Benef. m.</th><th>ROI</th><th>Días</th></tr></thead>`;
-  const porMT = agrupar(vd, i => `${i.brand || 'Sin marca'} · ${i.size || '–'}`);
-  const porMarca = agrupar(vd, i => i.brand || 'Sin marca');
-  const porOrigen = agrupar(vd, i => i.origin || 'Sin origen');
-  const porLote = agrupar(vd.filter(i => i.lot), i => i.lot);
-  const tabla = (t, arr, p) => arr.length ? `<h3>${t}</h3><div class="card tw"><table>${cab(p)}<tbody>${filas(arr)}</tbody></table></div>` : '';
-  return `<div class="grid4">
-      ${kpi('Invertido', eur(invertido))}
-      ${kpi('Ingresos (neto)', eur(ingresos))}
-      ${kpi('Beneficio vendidas', eur(benVendidas), benVendidas >= 0 ? 'pos' : 'neg')}
-      ${kpi('ROI vendidas', roi.toFixed(0) + '%', roi >= 0 ? 'pos' : 'neg')}
-      ${kpi('Prendas vendidas', vd.length)}
-      ${kpi('Dinero en stock', eur(enStockCoste))}
-      ${kpi('Balance de caja', eur(balance), balance >= 0 ? 'pos' : 'neg')}
-      ${kpi('Beneficio medio', vd.length ? eur(benVendidas / vd.length) : '–')}
+  const grupos = gruposDim(S);
+  const filas = grupos.map(g => `<tr><td>${esc(g.k)}</td><td>${g.n}</td><td>${eur(g.costeMedio)}</td><td>${eur(g.ventaMedia)}</td><td class="${g.benMedio >= 0 ? 'pos' : 'neg'}">${eur(g.benMedio)}</td><td class="${g.benTotal >= 0 ? 'pos' : 'neg'}">${eur(g.benTotal)}</td><td>${g.roi.toFixed(0)}%</td><td>${g.dias === null ? '–' : g.dias.toFixed(0)}</td></tr>`).join('');
+  const mesVal = RE_MES.test(periodo) ? periodo : '';
+  const altoTop = Math.max(140, Math.min(grupos.length, 8) * 34 + 40);
+  const T = serieTemporal(S);
+  return `<div class="chips">${chipsHtml(PERIODOS, periodo, 'per')}</div>
+    <div class="row" style="margin:0 0 10px;align-items:center"><label style="margin:0">Elegir mes:</label><input type="month" id="perMes" value="${mesVal}" style="width:auto"><span class="note">Mostrando: <b>${esc(R.etiqueta)}</b></span></div>
+    <div class="grid4">
+      ${kpi('Invertido', eur(S.invertido))}
+      ${kpi('Ingresos (neto)', eur(S.ingresos))}
+      ${kpi('Beneficio vendidas', eur(S.ben), S.ben >= 0 ? 'pos' : 'neg')}
+      ${kpi('ROI vendidas', S.roi.toFixed(0) + '%', S.roi >= 0 ? 'pos' : 'neg')}
+      ${kpi('Prendas vendidas', S.vd.length)}
+      ${kpi('Dinero en stock (ahora)', eur(S.stockCoste))}
+      ${kpi('Balance de caja', eur(S.balance), S.balance >= 0 ? 'pos' : 'neg')}
+      ${kpi('Beneficio medio', S.vd.length ? eur(S.ben / S.vd.length) : '–')}
+      ${kpi('Tiempo medio de venta', S.diasMedios === null ? '–' : S.diasMedios.toFixed(0) + ' días')}
     </div>
-    <p class="note">Balance de caja = lo que has ingresado menos todo lo que has gastado (incluye prendas aún sin vender). Las prendas marcadas como "uso personal" no cuentan.</p>
-    <h3>Gasto e ingresos por mes</h3><div class="card"><canvas id="chMes" height="220"></canvas></div>
+    <p class="note">Invertido, ingresos y balance son del periodo elegido (compras por fecha de compra, ventas por fecha de venta). El dinero en stock es el de ahora. Balance de caja = ingresos menos lo gastado. Las prendas de uso personal no cuentan.</p>
+    <h3>Gasto e ingresos por ${T.por}</h3><div class="card"><canvas id="chMes" height="220"></canvas></div>
     <h3>Balance acumulado</h3><div class="card"><canvas id="chAcum" height="200"></canvas></div>
-    ${tabla('Qué marca y talla te salen más rentables', porMT, 'Marca · talla')}
-    ${tabla('Por marca', porMarca, 'Marca')}
-    ${tabla('Por origen de compra', porOrigen, 'Origen')}
-    ${tabla('Por lote / bala', porLote, 'Lote')}
-    ${vd.length ? '' : '<div class="card note">Cuando marques prendas como vendidas, aquí aparecerán las medias por marca, talla y origen.</div>'}
+    <h3>¿Qué te sale mejor?</h3>
+    <div class="chips">${chipsHtml(DIMS, dim, 'dim')}</div>
+    <div class="chips">${chipsHtml(ORDENES, orden, 'ord')}</div>
+    ${grupos.length
+      ? `<div class="card"><div style="position:relative;height:${altoTop}px"><canvas id="chTop"></canvas></div></div>
+         <div class="card tw"><table><thead><tr><th>${esc((DIMS.find(d => d[0] === dim) || [])[1] || '')}</th><th>Vend.</th><th>Coste m.</th><th>Venta m.</th><th>Benef. m.</th><th>Benef. total</th><th>ROI</th><th>Días</th></tr></thead><tbody>${filas}</tbody></table></div>`
+      : `<div class="card note">No hay ventas en este periodo${dim === 'lote' ? ' con lote asignado' : ''}. Cuando marques prendas como vendidas, aquí verás qué talla, marca y tipo te salen mejor.</div>`}
     <div class="row"><button class="btn primary" data-act="xlsx">Exportar a Excel</button></div>`;
 }
+
 function pintarCharts() {
-  if (typeof Chart === 'undefined') return;
-  const nb = negocio();
-  const meses = new Map();
-  const get = k => { if (!meses.has(k)) meses.set(k, { g: 0, i: 0 }); return meses.get(k); };
-  nb.forEach(i => { if (i.dateBought) get(i.dateBought.slice(0, 7)).g += coste(i); });
-  vendidas().forEach(i => { if (i.dateSold) get(i.dateSold.slice(0, 7)).i += num(i.sellPrice) - num(i.sellFees); });
-  const keys = [...meses.keys()].sort();
-  if (!keys.length) return;
-  const labels = keys.map(k => { const [y, m] = k.split('-'); return MESES[+m - 1].slice(0, 3) + ' ' + y.slice(2); });
+  if (typeof Chart === 'undefined' || !statsCache) return;
+  const S = statsCache, T = serieTemporal(S);
   const css = getComputedStyle(document.documentElement);
-  const c1 = css.getPropertyValue('--bad').trim() || '#b42318', c2 = css.getPropertyValue('--good').trim() || '#15803d', ink = css.getPropertyValue('--muted').trim() || '#667380';
+  const col = n => css.getPropertyValue(n).trim();
+  const c1 = col('--bad') || '#b42318', c2 = col('--good') || '#15803d', cA = col('--accent') || '#0f766e', ink = col('--muted') || '#667380';
   const opt = { responsive: true, plugins: { legend: { labels: { color: ink } } }, scales: { x: { ticks: { color: ink } }, y: { ticks: { color: ink, callback: v => v + ' €' } } } };
-  charts.push(new Chart($('#chMes'), { type: 'bar', data: { labels, datasets: [{ label: 'Gasto', data: keys.map(k => +meses.get(k).g.toFixed(2)), backgroundColor: c1 }, { label: 'Ingresos', data: keys.map(k => +meses.get(k).i.toFixed(2)), backgroundColor: c2 }] }, options: opt }));
-  let acc = 0;
-  const acum = keys.map(k => +(acc += meses.get(k).i - meses.get(k).g).toFixed(2));
-  charts.push(new Chart($('#chAcum'), { type: 'line', data: { labels, datasets: [{ label: 'Balance acumulado', data: acum, borderColor: css.getPropertyValue('--accent').trim() || '#0f766e', tension: .25, fill: false }] }, options: opt }));
+  if (T.labels.length && $('#chMes')) {
+    charts.push(new Chart($('#chMes'), { type: 'bar', data: { labels: T.labels, datasets: [{ label: 'Gasto', data: T.gasto, backgroundColor: c1 }, { label: 'Ingresos', data: T.ingresos, backgroundColor: c2 }] }, options: opt }));
+    let acc = 0;
+    const acum = T.labels.map((_, k) => +(acc += T.ingresos[k] - T.gasto[k]).toFixed(2));
+    charts.push(new Chart($('#chAcum'), { type: 'line', data: { labels: T.labels, datasets: [{ label: 'Balance acumulado', data: acum, borderColor: cA, backgroundColor: cA, pointRadius: T.labels.length > 1 ? 3 : 6, tension: .25, fill: false }] }, options: opt }));
+  }
+  const top = gruposDim(S).slice(0, 8);
+  if (top.length && $('#chTop')) {
+    const m = { n: ['Prendas vendidas', g => g.n, v => v], benMedio: ['Beneficio medio', g => +g.benMedio.toFixed(2), v => v + ' €'], benTotal: ['Beneficio total', g => +g.benTotal.toFixed(2), v => v + ' €'], roi: ['ROI', g => +g.roi.toFixed(0), v => v + ' %'], dias: ['Días hasta vender', g => g.dias === null ? 0 : +g.dias.toFixed(0), v => v + ' d'] }[orden] || ['Prendas vendidas', g => g.n, v => v];
+    charts.push(new Chart($('#chTop'), {
+      type: 'bar',
+      data: { labels: top.map(g => g.k), datasets: [{ label: m[0], data: top.map(m[1]), backgroundColor: cA }] },
+      options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, title: { display: true, text: m[0], color: ink } }, scales: { x: { beginAtZero: true, ticks: { color: ink, callback: m[2] } }, y: { ticks: { color: ink } } } }
+    }));
+  }
 }
 
 /* ---- Calendario ---- */
@@ -329,7 +421,8 @@ function abrirForm(id) {
     <div class="grid2"><div><label>Categoría</label><input type="text" name="category" value="${esc(d.category)}" placeholder="Sudadera, vaqueros…"></div><div><label>Estado de la prenda</label><select name="condition">${sel(CONDICIONES, d.condition)}</select></div></div>
     <label>Título</label><input type="text" name="title" maxlength="100" value="${esc(d.title)}">
     <label>Descripción</label><textarea name="description">${esc(d.description)}</textarea>
-    <div class="row"><button type="button" class="btn" data-act="copyt">Copiar título</button><button type="button" class="btn" data-act="copyd">Copiar descripción</button></div>
+    <div class="row"><button type="button" class="btn" data-act="copyt">Copiar título</button><button type="button" class="btn" data-act="copyd">Copiar descripción</button><button type="button" class="btn" data-act="sharef">Enviar fotos a Vinted / galería</button><button type="button" class="btn" data-act="dlf">Descargar fotos</button></div>
+    <p class="note">Para publicar: copia título y descripción, y pasa las fotos con "Enviar fotos" (menú de compartir) o "Descargar fotos" (quedan en la carpeta Descargas). Toca una miniatura para verla en grande.</p>
     <h3>Compra</h3>
     <div class="grid2"><div><label>Origen</label><select name="origin">${sel(ORIGENES, d.origin)}</select></div><div><label>Lote / bala (opcional)</label><input type="text" name="lot" value="${esc(d.lot)}" placeholder="Bala julio"></div></div>
     <div class="grid3"><div><label>Precio (€)</label><input type="number" step="0.01" inputmode="decimal" name="buyPrice" value="${d.buyPrice ?? ''}"></div><div><label>Envío compra (€)</label><input type="number" step="0.01" inputmode="decimal" name="buyShip" value="${d.buyShip ?? ''}"></div><div><label>Fecha compra</label><input type="date" name="dateBought" value="${esc(d.dateBought)}"></div></div>
@@ -352,7 +445,7 @@ function abrirForm(id) {
   $('#frm').onsubmit = ev => { ev.preventDefault(); guardarForm(it ? it.id : null); };
 }
 function pintarFotos() {
-  $('#photos').innerHTML = formPhotos.map((p, k) => `<div class="ph"><img src="${p}" alt=""><button type="button" class="x" data-act="quitaf" data-k="${k}">×</button></div>`).join('') +
+  $('#photos').innerHTML = formPhotos.map((p, k) => `<div class="ph"><img src="${p}" alt="Foto ${k + 1}" data-act="verf" data-k="${k}" style="cursor:zoom-in"><button type="button" class="x" data-act="quitaf" data-k="${k}">×</button></div>`).join('') +
     (formPhotos.length < 8 ? `<div class="addph" data-act="addf">+ Foto<br>o cámara</div>` : '');
 }
 async function guardarForm(id) {
@@ -417,6 +510,8 @@ function exportarExcel() {
   const rg = arr => arr.map(g => ({ Grupo: g.k, Vendidas: g.n, Coste_medio: +g.costeMedio.toFixed(2), Venta_media: +g.ventaMedia.toFixed(2), Beneficio_medio: +g.benMedio.toFixed(2), Beneficio_total: +g.benTotal.toFixed(2), ROI_pct: +g.roi.toFixed(1), Dias_medios: g.dias === null ? '' : +g.dias.toFixed(1) }));
   const mt = rg(agrupar(vd, i => `${i.brand || 'Sin marca'} · ${i.size || '–'}`));
   const mr = rg(agrupar(vd, i => i.brand || 'Sin marca'));
+  const mtal = rg(agrupar(vd, i => i.size || 'Sin talla'));
+  const mcat = rg(agrupar(vd, i => i.category || 'Sin tipo'));
   if (typeof XLSX === 'undefined') { // respaldo en CSV si no cargó la librería
     const cols = Object.keys(filas[0] || { Título: '' });
     const csv = [cols.join(';'), ...filas.map(r => cols.map(c => `"${String(r[c] ?? '').replace(/"/g, '""')}"`).join(';'))].join('\n');
@@ -426,6 +521,8 @@ function exportarExcel() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filas), 'Prendas');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mt), 'Marca y talla');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mr), 'Por marca');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mtal), 'Por talla');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mcat), 'Por tipo');
   XLSX.writeFile(wb, `reventa-${today()}.xlsx`);
 }
 function exportarJSON() {
@@ -440,6 +537,69 @@ async function importarJSON(file) {
     cloudSync();
   } catch { toast('Archivo de copia no válido'); }
 }
+
+/* ========= Fotos: compartir, descargar y visor ========= */
+/* Pasa las fotos de la prenda a otra app (Vinted, Galería, WhatsApp…) con el menú "Compartir" del móvil.
+   Si el dispositivo no lo permite (p. ej. un ordenador), las descarga como archivos .jpg. */
+async function compartirFotos() {
+  if (!formPhotos.length) { toast('Esta prenda no tiene fotos'); return; }
+  const titulo = ($('#frm')?.title?.value || 'prenda').trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 40) || 'prenda';
+  try {
+    const files = await Promise.all(formPhotos.map(async (p, k) => new File([await dataABlob(p)], `${titulo}-${k + 1}.jpg`, { type: 'image/jpeg' })));
+    if (navigator.canShare && navigator.canShare({ files })) {
+      try { await navigator.share({ files }); }
+      catch (e) { if (e.name !== 'AbortError') toast('No se pudo abrir el menú de compartir'); }
+      return;
+    }
+    files.forEach((f, k) => setTimeout(() => descargar(f, f.name), k * 400));
+    toast(`Descargando ${files.length} foto(s)…`);
+  } catch { toast('No se pudieron preparar las fotos'); }
+}
+const slugTitulo = () => ($('#frm')?.title?.value || 'prenda').trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 40) || 'prenda';
+
+/* Descarga todas las fotos de la prenda como .jpg (una a una; el navegador puede pedir permiso para descargas múltiples). */
+async function descargarFotos() {
+  if (!formPhotos.length) { toast('Esta prenda no tiene fotos'); return; }
+  const base = slugTitulo(), n = formPhotos.length;
+  try {
+    for (let k = 0; k < n; k++) {
+      descargar(await dataABlob(formPhotos[k]), `${base}-${k + 1}.jpg`);
+      if (k < n - 1) await new Promise(r => setTimeout(r, 400));
+    }
+    toast(`Descargadas ${n} foto(s). Búscalas en Descargas.`);
+  } catch { toast('No se pudieron descargar las fotos'); }
+}
+
+/* Visor a pantalla completa de las fotos de la prenda */
+function cerrarVisor() { const v = $('#lb'); if (v) v.remove(); }
+function abrirVisor(k) {
+  const n = formPhotos.length;
+  if (!(k >= 0 && k < n)) return;
+  cerrarVisor();
+  const d = document.createElement('div');
+  d.id = 'lb'; d.className = 'lb'; d.dataset.k = String(k);
+  d.innerHTML = `<img src="${formPhotos[k]}" alt="Foto ${k + 1}"><div class="note" style="color:#ddd">Foto ${k + 1} de ${n}</div>
+    <div class="bar">${n > 1 ? '<button type="button" class="btn" data-act="lbprev">‹ Anterior</button><button type="button" class="btn" data-act="lbnext">Siguiente ›</button>' : ''}<button type="button" class="btn primary" data-act="lbdl">Descargar esta foto</button><button type="button" class="btn" data-act="lbclose">Cerrar</button></div>`;
+  document.body.appendChild(d);
+}
+function visorIr(delta) {
+  const v = $('#lb'); if (!v) return;
+  const n = formPhotos.length;
+  abrirVisor((((+v.dataset.k + delta) % n) + n) % n);
+}
+async function visorDescargar() {
+  const v = $('#lb'); if (!v) return;
+  const k = +v.dataset.k;
+  if (!formPhotos[k]) return;
+  try { descargar(await dataABlob(formPhotos[k]), `${slugTitulo()}-${k + 1}.jpg`); toast('Foto descargada'); }
+  catch { toast('No se pudo descargar la foto'); }
+}
+document.addEventListener('keydown', e => {
+  if (!$('#lb')) return;
+  if (e.key === 'Escape') cerrarVisor();
+  else if (e.key === 'ArrowRight') visorIr(1);
+  else if (e.key === 'ArrowLeft') visorIr(-1);
+});
 
 /* ========= Nube (Supabase): cuentas y sincronización ========= */
 /* Cada prenda se guarda como una fila (campos) + fotos en un almacén privado.
@@ -467,6 +627,7 @@ function hashFoto(dataUrl) { // hash del contenido de la foto (sin la cabecera d
   return (h >>> 0).toString(16) + '-' + s.length.toString(16);
 }
 async function dataABlob(d) { return (await fetch(d)).blob(); }
+
 function blobAData(b) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); }); }
 
 async function pushItem(it) {
@@ -570,6 +731,7 @@ async function cerrarSesion() {
 
 /* ========= Eventos ========= */
 document.addEventListener('click', async e => {
+  if (e.target.id === 'lb') { cerrarVisor(); return; } // clic en el fondo del visor
   const tb = e.target.closest('.tabs button');
   if (tb) { tab = tb.dataset.tab; render(); window.scrollTo(0, 0); return; }
   const el = e.target.closest('[data-act]'); if (!el) return;
@@ -581,6 +743,13 @@ document.addEventListener('click', async e => {
   else if (a === 'addf') $('#fileIn').click();
   else if (a === 'quitaf') { formPhotos.splice(+el.dataset.k, 1); pintarFotos(); }
   else if (a === 'ia') accionIA();
+  else if (a === 'sharef') compartirFotos();
+  else if (a === 'dlf') descargarFotos();
+  else if (a === 'verf') abrirVisor(+el.dataset.k);
+  else if (a === 'lbclose') cerrarVisor();
+  else if (a === 'lbprev') visorIr(-1);
+  else if (a === 'lbnext') visorIr(1);
+  else if (a === 'lbdl') visorDescargar();
   else if (a === 'copyt' || a === 'copyd') {
     const v = $('#frm')[a === 'copyt' ? 'title' : 'description'].value;
     try { await navigator.clipboard.writeText(v); toast('Copiado'); } catch { toast('No se pudo copiar'); }
@@ -598,6 +767,9 @@ document.addEventListener('click', async e => {
   else if (a === 'syncnow') cloudSync(true);
   else if (a === 'mes') { calMes.setMonth(calMes.getMonth() + +el.dataset.v); calSel = null; render(); }
   else if (a === 'dia') { calSel = el.dataset.f; render(); }
+  else if (a === 'per') { periodo = el.dataset.v; render(); }
+  else if (a === 'dim') { dim = el.dataset.v; render(); }
+  else if (a === 'ord') { orden = el.dataset.v; render(); }
   else if (a === 'xlsx') exportarExcel();
   else if (a === 'exportjson') exportarJSON();
   else if (a === 'saveset') {
@@ -613,6 +785,7 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('change', e => {
+  if (e.target.id === 'perMes' && /^\d{4}-\d{2}$/.test(e.target.value)) { periodo = e.target.value; render(); return; }
   if (e.target.id === 'sProv') {
     const m = $('#sModel'); const s = settings();
     if (e.target.value === 'anthropic' && /^gemini/.test(m.value)) m.value = 'claude-haiku-5-5';
