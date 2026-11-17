@@ -415,6 +415,7 @@ function abrirForm(id) {
     <label>Fotos (máx. 8)</label>
     <div class="photos" id="photos"></div>
     <input type="file" id="fileIn" accept="image/*" multiple hidden>
+    <input type="file" id="camIn" accept="image/*" capture="environment" hidden>
     <div class="row"><button type="button" class="btn primary" id="btnIA" data-act="ia">✨ Generar título y descripción con IA</button></div>
     <div id="iaNote"></div>
     <div class="grid2"><div><label>Marca</label><input type="text" name="brand" value="${esc(d.brand)}"></div><div><label>Talla</label><input type="text" name="size" value="${esc(d.size)}"></div></div>
@@ -437,16 +438,18 @@ function abrirForm(id) {
   sheet.scrollTop = 0;
   pintarFotos();
   $('#stSel').onchange = e => $('#ventaBox').classList.toggle('hidden', e.target.value !== 'vendido');
-  $('#fileIn').onchange = async e => {
+  const alElegir = async e => {
     const files = [...e.target.files]; e.target.value = '';
     for (const f of files) { if (formPhotos.length >= 8) break; try { formPhotos.push(await comprimir(f)); } catch { toast('Una foto no se pudo leer'); } }
     pintarFotos();
   };
+  $('#fileIn').onchange = alElegir; // galería (varias a la vez)
+  $('#camIn').onchange = alElegir;  // cámara (una por toque)
   $('#frm').onsubmit = ev => { ev.preventDefault(); guardarForm(it ? it.id : null); };
 }
 function pintarFotos() {
   $('#photos').innerHTML = formPhotos.map((p, k) => `<div class="ph"><img src="${p}" alt="Foto ${k + 1}" data-act="verf" data-k="${k}" style="cursor:zoom-in"><button type="button" class="x" data-act="quitaf" data-k="${k}">×</button></div>`).join('') +
-    (formPhotos.length < 8 ? `<div class="addph" data-act="addf">+ Foto<br>o cámara</div>` : '');
+    (formPhotos.length < 8 ? `<div class="addph" data-act="addcam">📷<br>Cámara</div><div class="addph" data-act="addgal">🖼️<br>Galería</div>` : '');
 }
 async function guardarForm(id) {
   const f = new FormData($('#frm'));
@@ -740,7 +743,8 @@ document.addEventListener('click', async e => {
   else if (a === 'edit') abrirForm(el.dataset.id);
   else if (a === 'cerrar') cerrarForm();
   else if (a === 'filtro') { filtro = el.dataset.v; render(); }
-  else if (a === 'addf') $('#fileIn').click();
+  else if (a === 'addcam') $('#camIn').click();
+  else if (a === 'addgal') $('#fileIn').click();
   else if (a === 'quitaf') { formPhotos.splice(+el.dataset.k, 1); pintarFotos(); }
   else if (a === 'ia') accionIA();
   else if (a === 'sharef') compartirFotos();
