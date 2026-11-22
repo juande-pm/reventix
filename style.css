@@ -93,3 +93,27 @@ canvas{max-width:100%}
 .camlast img{width:100%;height:100%;object-fit:cover;display:block}
 .camflash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .12s}
 .camflash.on{opacity:.7}
+
+.cambottom{background:#000}
+.camstrip{display:flex;gap:10px;overflow-x:auto;padding:12px 16px 4px;min-height:8px}
+.camth{position:relative;flex:none}
+.camth img{width:60px;height:60px;object-fit:cover;border-radius:8px;display:block}
+.camx{position:absolute;top:-6px;right:-6px;width:26px;height:26px;border-radius:50%;border:0;background:#fff;color:#000;font-weight:700;font-size:16px;line-height:1;padding:0}
+.camspacer{width:64px}
+
+.btn.c-azul{--c:#1d4ed8}.btn.c-violeta{--c:#6d28d9}.btn.c-verde{--c:#15803d}.btn.c-naranja{--c:#c2410c}.btn.c-rosa{--c:#be185d}
+.btn[class*="c-"]{border-color:color-mix(in srgb,var(--c) 55%,var(--card));background:color-mix(in srgb,var(--c) 12%,var(--card));color:color-mix(in srgb,var(--c) 80%,var(--ink));font-weight:600}
+@media (prefers-color-scheme:dark){
+  .btn.c-azul{--c:#93c5fd}.btn.c-violeta{--c:#c4b5fd}.btn.c-verde{--c:#86efac}.btn.c-naranja{--c:#fdba74}.btn.c-rosa{--c:#f9a8d4}
+  .btn[class*="c-"]{background:color-mix(in srgb,var(--c) 16%,var(--card));color:var(--c)}
+}
+.tasa{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:8px}
+.tasa p{margin:6px 0}.tasa ul{margin:6px 0;padding-left:18px;font-size:14px}
+.tasa-cifras{display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:8px;text-align:center}
+.tasa-cifras small{display:block;color:var(--muted);font-size:12px}
+.tasa-cifras b{font-size:18px}.tasa-cifras .rec{background:color-mix(in srgb,var(--accent) 14%,var(--card));border-radius:10px;padding:4px}.tasa-cifras .rec b{font-size:22px}
+.chatlog{max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:12px;padding:8px;margin-top:8px;background:var(--card)}
+.msg{max-width:88%;padding:8px 10px;border-radius:12px;margin:6px 0;font-size:14px;overflow-wrap:anywhere}
+.msg.user{margin-left:auto;background:var(--accent);color:var(--accent-ink)}
+.msg.ai{background:var(--line);color:var(--ink)}
+.chatrow{flex-wrap:nowrap}.chatrow input{flex:1;min-width:0}

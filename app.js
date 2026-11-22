@@ -112,54 +112,347 @@ function comprimir(file, max = 1100, q = 0.72) {
 
 /* ========= IA ========= */
 function construirPrompt(ctx) {
+  const limpia = t => String(t || '').replace(/"""/g, '"').trim().slice(0, 2500);
+  const tt = limpia(ctx.title), dd = limpia(ctx.description);
+  const previo = (tt || dd) ? `
+
+El vendedor YA ha escrito esto (puede estar a medias o desordenado):
+TÍTULO ACTUAL: """${tt}"""
+DESCRIPCIÓN ACTUAL: """${dd}"""
+Reglas sobre ese texto del vendedor:
+- Es información fiable que él conoce de primera mano (medidas, defectos, material, uso, motivo de venta…). CONSERVA todos sus datos concretos tal cual (cifras, medidas, defectos, composición) en la nueva descripción: no los cambies ni los omitas.
+- Mejora la redacción y la estructura, y completa lo que falte con lo que se vea en las fotos, pero no contradigas lo que él ha escrito.
+- Si su título ya es bueno, puedes mantenerlo o pulirlo un poco.` : '';
   return `Eres un experto en vender ropa de segunda mano en Vinted España. Analiza las fotos de la prenda y devuelve SOLO un JSON válido (sin texto extra ni bloques de código) con estas claves:
 {"titulo":"","descripcion":"","marca":"","categoria":"","talla":"","precio_orientativo":""}
 
 Reglas:
 - "titulo": máximo 60 caracteres, en español, con este orden aproximado: tipo de prenda + marca + color/rasgo clave + talla si se conoce.
 - "descripcion": en español, tono natural y cercano, párrafos cortos. Incluye tipo de prenda, marca, color, material y talla solo si se ven o se indican. Menciona el estado con honestidad. Termina con una línea de envío/oferta amable y 3-5 hashtags útiles.
-- No inventes medidas, materiales ni marcas que no se vean en las fotos. Si no estás seguro, omite el dato o déjalo en "".
+- No inventes medidas, materiales ni marcas que no se vean en las fotos ni los haya escrito el vendedor. Si no estás seguro, omite el dato o déjalo en "".
 - "precio_orientativo": rango aproximado en euros (por ejemplo "12-18 €") según marca, tipo y estado. Es solo una estimación general, no datos de mercado en tiempo real.
 
-Datos que da el vendedor: marca="${ctx.brand || ''}", talla="${ctx.size || ''}", categoría="${ctx.category || ''}", estado="${ctx.condition || ''}".`;
+Datos que da el vendedor: marca="${ctx.brand || ''}", talla="${ctx.size || ''}", categoría="${ctx.category || ''}", estado="${ctx.condition || ''}".${previo}`;
 }
 function extraerJSON(txt) {
   const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
-  if (a < 0 || b < 0) throw new Error('La IA no devolvió un formato válido. Inténtalo de nuevo.');
-  return JSON.parse(txt.slice(a, b + 1));
+  const falla = () => Object.assign(new Error('La IA no devolvió un formato válido. Inténtalo de nuevo.'), { code: 'formato' });
+  if (a < 0 || b < a) throw falla();
+  try { return JSON.parse(txt.slice(a, b + 1)); } catch { throw falla(); }
 }
-async function generarConIA(fotos, ctx) {
+
+/* --- Llamadas a la IA: siempre con tiempo límite, para que nunca se quede colgada --- */
+let IA_TIMEOUT_MS = 40000;  // por intento al generar un anuncio
+let IA_LISTA_MS = 15000;    // al pedir la lista de modelos
+let IA_PRUEBA_MS = 30000;   // en la prueba de conexión
+let iaCtl = null;           // permite cancelar desde el botón o al cerrar el formulario
+function cancelarIA() { if (iaCtl) iaCtl.abort(); }
+
+const esperar = (ms, ext) => new Promise((res, rej) => {
+  const t = setTimeout(res, ms);
+  if (ext) ext.addEventListener('abort', () => { clearTimeout(t); rej(Object.assign(new Error('cancelado'), { code: 'cancelado' })); }, { once: true });
+});
+
+// fetch + lectura del JSON dentro del mismo tiempo límite. Errores con .code = 'timeout' | 'cancelado' | 'red'
+async function pedirJSON(url, opts, ms, ext) {
+  const ctl = new AbortController();
+  let vencio = false;
+  const t = setTimeout(() => { vencio = true; ctl.abort(); }, ms);
+  const alCancelar = () => ctl.abort();
+  if (ext) { if (ext.aborted) ctl.abort(); else ext.addEventListener('abort', alCancelar); }
+  try {
+    const r = await fetch(url, { ...opts, signal: ctl.signal });
+    let j = {};
+    try { j = await r.json(); } catch (e) { if (vencio || (ext && ext.aborted)) throw e; }
+    return { status: r.status, ok: r.ok, j: j || {} };
+  } catch (e) {
+    if (vencio) throw Object.assign(new Error('tiempo agotado'), { code: 'timeout' });
+    if (ext && ext.aborted) throw Object.assign(new Error('cancelado'), { code: 'cancelado' });
+    throw Object.assign(new Error((e && e.message) || 'sin conexión'), { code: 'red' });
+  } finally {
+    clearTimeout(t);
+    if (ext) ext.removeEventListener('abort', alCancelar);
+  }
+}
+
+function errorIA(status, j, modelo) {
+  const raw = j && j.error ? (j.error.message || j.error.type || '') : '';
+  const m = String(raw).replace(/key=[^&\s]+/g, 'key=…').slice(0, 160);
+  let txt;
+  if (status === 400 && /api key|api_key|key not valid|invalid.*key/i.test(m)) txt = 'La clave de API no es válida. Revísala en Ajustes.';
+  else if (status === 401 || status === 403) txt = `La clave no es válida o no tiene permiso para este modelo (error ${status}). Revísala en Ajustes.`;
+  else if (status === 404) txt = `El modelo "${modelo}" no existe o no está disponible con tu clave. En Ajustes pulsa "Probar conexión" para ver cuáles puedes usar.`;
+  else if (status === 429) txt = 'Has llegado al límite de uso gratuito o hay demasiadas peticiones. Espera un minuto e inténtalo otra vez.';
+  else if (status >= 500) txt = `El servidor de la IA está saturado o fallando (error ${status}).`;
+  else txt = `La IA devolvió el error ${status}${m ? ': ' + m : ''}.`;
+  return Object.assign(new Error(txt), { status, reintentable: status >= 500 });
+}
+function textoErrorIA(e, seg = Math.round(IA_TIMEOUT_MS / 1000), intentos = 1) {
+  if (e.code === 'timeout') return `La IA no respondió en ${seg} s${intentos > 1 ? ` (se probó ${intentos} veces)` : ''}. Suele ser un problema temporal de Google con ese modelo: en Ajustes pulsa "Probar conexión" y elige otro, o inténtalo más tarde.`;
+  if (e.code === 'red') return 'No hay conexión con la IA. Revisa tu internet (o la VPN) e inténtalo de nuevo.';
+  return e.message || 'Error desconocido';
+}
+
+// Reduce la foto antes de enviarla: manda menos datos y la IA contesta antes
+function reducirParaIA(dataUrl, max = 768, q = 0.7) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', q).split(',')[1]);
+    };
+    img.onerror = () => rej(new Error('No se pudo preparar una foto para la IA'));
+    img.src = dataUrl;
+  });
+}
+
+const URL_GEMINI = (modelo, key) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelo)}:generateContent?key=${encodeURIComponent(key)}`;
+
+async function llamarGemini(s, prompt, imgs, modoJson, ext) {
+  const cuerpo = {
+    contents: [{ parts: [{ text: prompt }, ...imgs.map(d => ({ inline_data: { mime_type: 'image/jpeg', data: d } }))] }],
+    generationConfig: { temperature: 0.6 }
+  };
+  if (modoJson) cuerpo.generationConfig.responseMimeType = 'application/json';
+  const r = await pedirJSON(URL_GEMINI(s.model, s.apiKey), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo) }, IA_TIMEOUT_MS, ext);
+  if (!r.ok) throw errorIA(r.status, r.j, s.model);
+  const c = r.j.candidates && r.j.candidates[0];
+  const txt = c && c.content && c.content.parts ? c.content.parts.map(p => p.text || '').join('') : '';
+  if (!txt) {
+    const br = r.j.promptFeedback && r.j.promptFeedback.blockReason;
+    throw Object.assign(new Error(br ? `La IA bloqueó la petición (${br}). Prueba con otras fotos.` : 'La IA no devolvió texto. Inténtalo de nuevo.'), { reintentable: !br });
+  }
+  return txt;
+}
+
+async function llamarClaude(s, prompt, imgs, ext) {
+  const r = await pedirJSON('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': s.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({
+      model: s.model, max_tokens: 1200,
+      messages: [{ role: 'user', content: [...imgs.map(d => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: d } })), { type: 'text', text: prompt }] }]
+    })
+  }, IA_TIMEOUT_MS, ext);
+  if (!r.ok) throw errorIA(r.status, r.j, s.model);
+  const txt = (r.j.content || []).map(p => p.text || '').join('');
+  if (!txt) throw Object.assign(new Error('La IA no devolvió texto. Inténtalo de nuevo.'), { reintentable: true });
+  return txt;
+}
+
+// ext: AbortSignal para cancelar. alIntento(n, max): aviso de progreso.
+async function generarConIA(fotos, ctx, ext, alIntento) {
   const s = settings();
   if (!s.apiKey) throw new Error('Falta la clave de API. Ponla en Ajustes.');
   if (!fotos.length) throw new Error('Añade al menos una foto.');
-  const imgs = fotos.slice(0, 4).map(p => p.split(',')[1]);
+  const imgs = [];
+  for (const p of fotos.slice(0, 4)) imgs.push(await reducirParaIA(p));
   const prompt = construirPrompt(ctx);
-  let txt;
-  if (s.provider === 'gemini') {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(s.model)}:generateContent?key=${encodeURIComponent(s.apiKey)}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }, ...imgs.map(d => ({ inline_data: { mime_type: 'image/jpeg', data: d } }))] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.6 }
-      })
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j?.error?.message || `Error ${r.status} de la API de Gemini`);
-    txt = j?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-  } else {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': s.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({
-        model: s.model, max_tokens: 1200,
-        messages: [{ role: 'user', content: [...imgs.map(d => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: d } })), { type: 'text', text: prompt }] }]
-      })
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j?.error?.message || `Error ${r.status} de la API de Claude`);
-    txt = j?.content?.map(p => p.text || '').join('') || '';
+  const MAX = 2;
+  let ultimo = null, n = 0;
+  for (n = 1; n <= MAX; n++) {
+    if (alIntento) alIntento(n, MAX);
+    try {
+      // 1.º intento con "modo JSON"; si falla, el 2.º va en modo normal (a veces el modo JSON es lo que se atasca)
+      const txt = s.provider === 'gemini' ? await llamarGemini(s, prompt, imgs, n === 1, ext) : await llamarClaude(s, prompt, imgs, ext);
+      return extraerJSON(txt);
+    } catch (e) {
+      if (e.code === 'cancelado') throw e;
+      ultimo = e;
+      const reintentar = e.code === 'timeout' || e.code === 'red' || e.code === 'formato' || e.reintentable;
+      if (!reintentar || n === MAX) break;
+      await esperar(1200, ext);
+    }
   }
-  return extraerJSON(txt);
+  throw Object.assign(new Error(textoErrorIA(ultimo, undefined, Math.min(n, MAX))), { code: ultimo.code });
+}
+
+/* --- Tasación y chat: reutilizan las mismas llamadas con tiempo límite --- */
+const llamarIA = (s, prompt, imgs, json, ext) => s.provider === 'gemini' ? llamarGemini(s, prompt, imgs, json, ext) : llamarClaude(s, prompt, imgs, ext);
+
+async function imgsIA(fotos, n = 3) {
+  const imgs = [];
+  for (const p of (fotos || []).slice(0, n)) imgs.push(await reducirParaIA(p));
+  return imgs;
+}
+
+// Repite una operación de IA si falla por algo temporal (tiempo agotado, red, 5xx, formato). hacer(n) hace una llamada.
+async function conReintentos(hacer, ext, alIntento, MAX = 2) {
+  let ultimo = null, n;
+  for (n = 1; n <= MAX; n++) {
+    if (alIntento) alIntento(n, MAX);
+    try { return await hacer(n); }
+    catch (e) {
+      if (e.code === 'cancelado') throw e;
+      ultimo = e;
+      const reintentar = e.code === 'timeout' || e.code === 'red' || e.code === 'formato' || e.reintentable;
+      if (!reintentar || n === MAX) break;
+      await esperar(1200, ext);
+    }
+  }
+  throw Object.assign(new Error(textoErrorIA(ultimo, undefined, Math.min(n, MAX))), { code: ultimo.code });
+}
+
+const mediana = a => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const redondea = x => Math.round(x * 100) / 100;
+
+// Precios sueltos que el vendedor ha copiado de anuncios parecidos ("18, 22 €, 15,50")
+function parseComps(t) {
+  return (String(t || '').match(/\d+(?:[.,]\d{1,2})?/g) || []).map(num).filter(x => x > 0 && x < 5000);
+}
+
+// Lo que ya has vendido de esa marca (y de esa talla), con tus propios datos
+function historialPropio(marca, talla, exceptoId) {
+  const b = String(marca || '').trim().toLowerCase();
+  if (!b) return { n: 0 };
+  const l = vendidas().filter(i => String(i.brand || '').trim().toLowerCase() === b && i.id !== exceptoId && num(i.sellPrice) > 0);
+  if (!l.length) return { n: 0 };
+  const t = String(talla || '').trim().toLowerCase();
+  const lt = t ? l.filter(i => String(i.size || '').trim().toLowerCase() === t) : [];
+  const dias = l.map(i => diasEntre(i.datePublished || i.dateBought, i.dateSold)).filter(d => d !== null && d >= 0);
+  const ventas = l.map(i => num(i.sellPrice));
+  return {
+    n: l.length, mediana: redondea(mediana(ventas)), min: Math.min(...ventas), max: Math.max(...ventas),
+    dias: dias.length ? Math.round(mediana(dias)) : null,
+    nTalla: lt.length, medianaTalla: lt.length ? redondea(mediana(lt.map(i => num(i.sellPrice)))) : null
+  };
+}
+
+function datosTasacion(f, exceptoId) {
+  const g = k => (f[k] ? String(f[k].value || '').trim() : '');
+  const comps = parseComps(g('comps'));
+  return {
+    brand: g('brand'), size: g('size'), category: g('category'), condition: g('condition'), title: g('title'), description: g('description'),
+    coste: num(g('buyPrice')) + num(g('buyShip')), comps, medComps: comps.length ? redondea(mediana(comps)) : null,
+    hist: historialPropio(g('brand'), g('size'), exceptoId)
+  };
+}
+
+function construirPromptTasacion(d) {
+  const h = d.hist || { n: 0 };
+  const propio = h.n
+    ? `Ventas REALES anteriores del vendedor de esta marca: ${h.n} (mediana ${h.mediana} €, entre ${h.min} y ${h.max} €${h.dias !== null ? `, tardó una mediana de ${h.dias} días en venderlas` : ''}).${h.nTalla ? ` De la misma talla: ${h.nTalla} (mediana ${h.medianaTalla} €).` : ''}`
+    : 'El vendedor no tiene ventas anteriores de esta marca.';
+  const comps = d.comps.length
+    ? `Precios de ${d.comps.length} anuncios parecidos que el vendedor ha visto publicados (precio pedido, no vendido; mediana ${d.medComps} €): ${d.comps.join(', ')} €.`
+    : 'El vendedor no ha aportado precios de anuncios parecidos.';
+  const limpia = t => String(t || '').replace(/"""/g, '"').slice(0, 1500);
+  return `Eres un experto en reventa de ropa de segunda mano en Vinted y Wallapop España. Tasa el precio al que PUBLICAR esta prenda, mirando las fotos y los datos. Devuelve SOLO un JSON válido (sin texto extra ni bloques de código):
+{"minimo":0,"recomendado":0,"maximo":0,"razon":"","consejos":[""],"confianza":""}
+
+Reglas:
+- Precios en euros como números (sin símbolo). Se cumple minimo <= recomendado <= maximo.
+- "recomendado": precio de publicación razonable para venderla en unas pocas semanas, dejando algo de margen para negociar. "minimo": hasta dónde se podría bajar. "maximo": precio de salida optimista.
+- Tienes en cuenta marca, tipo de prenda, estado real que se ve en las fotos y los datos del vendedor.
+- Si hay ventas anteriores del vendedor o anuncios parecidos, dales mucho peso: son datos reales. Los anuncios son precio pedido, no precio final de venta.
+- No tienes acceso a precios de mercado en tiempo real: no inventes cifras de mercado ni cites anuncios que no se te hayan dado.
+- "razon": 1-3 frases en español explicando en qué te basas. "consejos": como máximo 3 consejos cortos (negociación, fotos, momento de bajar precio). "confianza": "baja", "media" o "alta" según la cantidad de datos reales.
+
+Datos de la prenda: marca="${d.brand}", talla="${d.size}", categoría="${d.category}", estado="${d.condition}".
+Lo que pagó el vendedor (coste total): ${d.coste > 0 ? d.coste + ' €' : 'no indicado'}.
+Título del vendedor: """${limpia(d.title)}"""
+Descripción del vendedor (fiable: medidas, defectos…): """${limpia(d.description)}"""
+${propio}
+${comps}`;
+}
+
+// Convierte la respuesta de la IA en cifras seguras (o lanza error de formato para reintentar)
+function normalizarTasa(j) {
+  const n = v => { const x = typeof v === 'number' ? v : num(v); return isFinite(x) && x > 0 && x < 100000 ? redondea(x) : null; };
+  const rec = n(j && (j.recomendado ?? j.recomendada));
+  if (rec === null) throw Object.assign(new Error('La IA no devolvió un precio válido. Inténtalo de nuevo.'), { code: 'formato' });
+  let min = n(j.minimo ?? j.min), max = n(j.maximo ?? j.max);
+  if (min === null || min > rec) min = rec;
+  if (max === null || max < rec) max = rec;
+  const consejos = Array.isArray(j.consejos) ? j.consejos.map(c => String(c || '').trim()).filter(Boolean).slice(0, 3) : [];
+  const conf = ['baja', 'media', 'alta'].includes(String(j.confianza || '').toLowerCase()) ? String(j.confianza).toLowerCase() : '';
+  return { min, rec, max, razon: String(j.razon || '').slice(0, 600), consejos, confianza: conf };
+}
+
+async function tasarConIA(fotos, d, ext, alIntento) {
+  const s = settings();
+  if (!s.apiKey) throw new Error('Falta la clave de API. Ponla en Ajustes.');
+  const imgs = await imgsIA(fotos, 3);
+  const prompt = construirPromptTasacion(d);
+  return conReintentos(async n => normalizarTasa(extraerJSON(await llamarIA(s, prompt, imgs, n === 1, ext))), ext, alIntento);
+}
+
+/* --- Chat sobre la prenda --- */
+function contextoPrenda(d, tasa) {
+  const h = d.hist || { n: 0 };
+  return [
+    `Marca: ${d.brand || '?'}; talla: ${d.size || '?'}; categoría: ${d.category || '?'}; estado: ${d.condition || '?'}.`,
+    d.title ? `Título: ${d.title}` : '', d.description ? `Descripción: ${String(d.description).slice(0, 1500)}` : '',
+    d.coste > 0 ? `Coste total para el vendedor: ${d.coste} €.` : '',
+    h.n ? `Ventas anteriores de esa marca: ${h.n}, mediana ${h.mediana} €.` : '',
+    d.comps && d.comps.length ? `Precios de anuncios parecidos: ${d.comps.join(', ')} €.` : '',
+    tasa ? `Tasación previa de la IA: mínimo ${tasa.min} €, recomendado ${tasa.rec} €, máximo ${tasa.max} €.` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function construirPromptChat(d, tasa, historial) {
+  const conv = historial.slice(-10).map(m => `${m.rol === 'user' ? 'Vendedor' : 'Asistente'}: ${m.texto}`).join('\n');
+  return `Eres un asistente experto en reventa de ropa de segunda mano en Vinted y Wallapop España. Responde en español, de forma breve y práctica (máximo unas 8 líneas). No tienes acceso a precios de mercado en tiempo real ni a internet: si no lo sabes con seguridad, dilo. No inventes datos de la prenda que no estén en las fotos o en el contexto.
+
+Contexto de la prenda (las fotos van adjuntas):
+${contextoPrenda(d, tasa)}
+
+Conversación hasta ahora:
+${conv}
+
+Responde al último mensaje del vendedor.`;
+}
+
+async function chatearConIA(fotos, d, tasa, historial, ext, alIntento) {
+  const s = settings();
+  if (!s.apiKey) throw new Error('Falta la clave de API. Ponla en Ajustes.');
+  const imgs = await imgsIA(fotos, 3);
+  const prompt = construirPromptChat(d, tasa, historial);
+  return conReintentos(async () => {
+    const t = (await llamarIA(s, prompt, imgs, false, ext)).trim();
+    if (!t) throw Object.assign(new Error('La IA no devolvió texto. Inténtalo de nuevo.'), { reintentable: true });
+    return t;
+  }, ext, alIntento);
+}
+
+/* --- Prueba de conexión (Ajustes): comprueba la clave, el modelo y cuánto tarda --- */
+const PROB_EXCLUIR = /image|tts|live|audio|embed|robotics|computer-use|imagen|veo|gemma/i;
+async function probarIA() {
+  const out = $('#iaTest'); if (!out) return;
+  const s = { ...settings(), provider: $('#sProv').value, apiKey: $('#sKey').value.trim(), model: $('#sModel').value.trim() || DEF.model };
+  if (!s.apiKey) { out.innerHTML = '<div class="hint">Pega primero tu clave de API.</div>'; return; }
+  out.innerHTML = '<p class="note">Comprobando la conexión… (puede tardar hasta unos 45 s)</p>';
+  const linea = (ok, t) => `<p class="note">${ok ? '✅' : '❌'} ${t}</p>`;
+  let html = '', modelos = [], sugeridos = [];
+  try {
+    if (s.provider === 'gemini') {
+      try {
+        const r = await pedirJSON(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(s.apiKey)}`, { method: 'GET' }, IA_LISTA_MS);
+        if (!r.ok) throw errorIA(r.status, r.j, s.model);
+        modelos = (r.j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => String(m.name || '').replace(/^models\//, ''));
+      } catch (e) { out.innerHTML = linea(false, esc(textoErrorIA(e, Math.round(IA_LISTA_MS / 1000)))); return; }
+      html += linea(true, `Clave aceptada. ${modelos.length} modelos disponibles con tu clave.`);
+      sugeridos = modelos.filter(m => /flash/i.test(m) && !PROB_EXCLUIR.test(m)).sort((a, b) => b.localeCompare(a, 'en', { numeric: true })).slice(0, 6);
+      if (!modelos.includes(s.model)) html += linea(false, `El modelo "${esc(s.model)}" no aparece entre los disponibles. Elige uno de la lista de abajo.`);
+    }
+    if (s.provider !== 'gemini' || modelos.includes(s.model)) {
+      const t0 = Date.now();
+      try {
+        const r = s.provider === 'gemini'
+          ? await pedirJSON(URL_GEMINI(s.model, s.apiKey), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: 'Responde solo con la palabra: ok' }] }] }) }, IA_PRUEBA_MS)
+          : await pedirJSON('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': s.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: s.model, max_tokens: 16, messages: [{ role: 'user', content: 'Responde solo con la palabra: ok' }] }) }, IA_PRUEBA_MS);
+        if (!r.ok) throw errorIA(r.status, r.j, s.model);
+        const seg = (Date.now() - t0) / 1000;
+        html += linea(true, `El modelo "${esc(s.model)}" respondió en ${seg.toFixed(1)} s.` + (seg > 15 ? ' Es lento: prueba otro modelo de la lista.' : ''));
+        html += '<p class="note">Esta prueba solo envía texto: con fotos puede tardar algo más.</p>';
+      } catch (e) { html += linea(false, esc(textoErrorIA(e, Math.round(IA_PRUEBA_MS / 1000)))); }
+    }
+    if (sugeridos.length) html += '<p class="note">Modelos "flash" disponibles con tu clave (toca uno para usarlo):</p><div class="chips">' + sugeridos.map(m => `<button type="button" class="chip ${m === s.model ? 'on' : ''}" data-act="usemodel" data-v="${esc(m)}">${esc(m)}</button>`).join('') + '</div>';
+  } catch (e) { html += linea(false, esc(textoErrorIA(e))); }
+  out.innerHTML = html;
 }
 
 /* ========= Render principal ========= */
@@ -197,7 +490,7 @@ function vistaInventario() {
     const th = i.photos?.[0] ? `<img class="thumb" src="${i.photos[0]}" alt="">` : `<div class="thumb"></div>`;
     const precio = i.status === 'vendido'
       ? `Vendida ${eur(i.sellPrice)} · <span class="${beneficio(i) >= 0 ? 'pos' : 'neg'}">${beneficio(i) >= 0 ? '+' : ''}${eur(beneficio(i))}</span>`
-      : `Coste ${eur(coste(i))}`;
+      : `Coste ${eur(coste(i))}${num(i.listPrice) > 0 ? ` · Publicada a ${eur(i.listPrice)}` : ''}`;
     return `<div class="card item" data-act="edit" data-id="${i.id}">${th}<div style="min-width:0;flex:1">
       <div class="t">${esc(i.title || 'Sin título')}</div>
       <div class="m">${esc([i.brand, i.size && 'Talla ' + i.size, i.lot].filter(Boolean).join(' · '))}</div>
@@ -395,8 +688,9 @@ function vistaAjustes() {
     <label>Proveedor</label><select id="sProv"><option value="gemini" ${s.provider === 'gemini' ? 'selected' : ''}>Google Gemini (tiene capa gratuita)</option><option value="anthropic" ${s.provider === 'anthropic' ? 'selected' : ''}>Claude (Anthropic API, de pago)</option></select>
     <label>Clave de API</label><input type="text" id="sKey" value="${esc(s.apiKey)}" placeholder="Pega aquí tu clave" autocomplete="off">
     <label>Modelo</label><input type="text" id="sModel" value="${esc(s.model)}">
-    <p class="note">La clave se guarda solo en este dispositivo y se envía directamente al proveedor. No la compartas. Si el modelo deja de existir, cambia aquí su nombre (ejemplos: gemini-3.8-flash, claude-haiku-5-5).</p>
-    <div class="row"><button class="btn primary" data-act="saveset">Guardar ajustes</button></div></div>
+    <p class="note">La clave se guarda solo en este dispositivo y se envía directamente al proveedor. No la compartas. Si la IA tarda o falla, pulsa "Probar conexión": comprueba la clave, qué modelos puedes usar y cuánto tarda cada uno.</p>
+    <div class="row"><button class="btn primary" data-act="saveset">Guardar ajustes</button><button class="btn" data-act="testia">Probar conexión</button></div>
+    <div id="iaTest"></div></div>
     <div class="card"><h3 style="margin-top:0">Copia de seguridad</h3>
     <p class="note">Tus datos y fotos viven en este navegador. Si borras los datos del navegador o cambias de móvil, se pierden. Haz copias a menudo.</p>
     <div class="row"><button class="btn" data-act="exportjson">Descargar copia (.json)</button><label class="btn" style="margin:0;color:var(--ink);font-size:16px">Restaurar copia<input type="file" id="impJson" accept="application/json" hidden></label><button class="btn" data-act="xlsx">Exportar a Excel</button></div></div>
@@ -407,6 +701,7 @@ function vistaAjustes() {
 function abrirForm(id) {
   const it = id ? items.find(x => x.id === id) : null;
   formPhotos = it ? [...(it.photos || [])] : [];
+  formId = id || null; iaPrev = null; tasaUlt = null; chatMsgs = [];
   const d = it || { status: 'stock', condition: 'Muy bueno', origin: ORIGENES[0], dateBought: today(), personal: false };
   const sel = (arr, v) => arr.map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('');
   const sheet = $('#sheet');
@@ -422,8 +717,15 @@ function abrirForm(id) {
     <div class="grid2"><div><label>Categoría</label><input type="text" name="category" value="${esc(d.category)}" placeholder="Sudadera, vaqueros…"></div><div><label>Estado de la prenda</label><select name="condition">${sel(CONDICIONES, d.condition)}</select></div></div>
     <label>Título</label><input type="text" name="title" maxlength="100" value="${esc(d.title)}">
     <label>Descripción</label><textarea name="description">${esc(d.description)}</textarea>
-    <div class="row"><button type="button" class="btn" data-act="copyt">Copiar título</button><button type="button" class="btn" data-act="copyd">Copiar descripción</button><button type="button" class="btn" data-act="sharef">Enviar fotos a Vinted / galería</button><button type="button" class="btn" data-act="dlf">Descargar fotos</button></div>
+    <div class="row"><button type="button" class="btn c-azul" data-act="copyt">Copiar título</button><button type="button" class="btn c-violeta" data-act="copyd">Copiar descripción</button><button type="button" class="btn c-verde" data-act="sharef">Enviar fotos a Vinted / galería</button><button type="button" class="btn c-naranja" data-act="dlf">Descargar fotos</button></div>
     <p class="note">Para publicar: copia título y descripción, y pasa las fotos con "Enviar fotos" (menú de compartir) o "Descargar fotos" (quedan en la carpeta Descargas). Toca una miniatura para verla en grande.</p>
+    <h3>Precio</h3>
+    <div class="grid2"><div><label>Precio de publicación (€)</label><input type="number" step="0.01" inputmode="decimal" name="listPrice" value="${d.listPrice ?? ''}"></div><div><label>¿No sabes cuánto pedir?</label><button type="button" class="btn c-rosa" style="width:100%" id="btnTasa" data-act="tasar">💶 Tasar con IA</button></div></div>
+    <label>Anuncios parecidos (opcional): apunta los precios que veas en Vinted/Wallapop</label>
+    <textarea name="comps" style="min-height:64px" placeholder="Solo precios, ej.: 18, 22, 15,50 (mejora mucho la tasación)">${esc(d.comps)}</textarea>
+    <div id="tasaBox"></div>
+    <div class="row"><button type="button" class="btn" data-act="chatopen">💬 Preguntar a la IA sobre esta prenda</button></div>
+    <div id="chatPanel" class="hidden"><div class="chatlog" id="chatLog"></div><div class="row chatrow"><input type="text" id="chatIn" placeholder="Escribe tu pregunta…" maxlength="500"><button type="button" class="btn primary" id="chatSend" data-act="chatsend">Enviar</button></div><div class="row"><button type="button" class="btn" data-act="chatclear">Borrar conversación</button></div><p class="note">La conversación no se guarda: se borra al cerrar la prenda.</p></div>
     <h3>Compra</h3>
     <div class="grid2"><div><label>Origen</label><select name="origin">${sel(ORIGENES, d.origin)}</select></div><div><label>Lote / bala (opcional)</label><input type="text" name="lot" value="${esc(d.lot)}" placeholder="Bala julio"></div></div>
     <div class="grid3"><div><label>Precio (€)</label><input type="number" step="0.01" inputmode="decimal" name="buyPrice" value="${d.buyPrice ?? ''}"></div><div><label>Envío compra (€)</label><input type="number" step="0.01" inputmode="decimal" name="buyShip" value="${d.buyShip ?? ''}"></div><div><label>Fecha compra</label><input type="date" name="dateBought" value="${esc(d.dateBought)}"></div></div>
@@ -457,7 +759,7 @@ async function guardarForm(id) {
   const prev = id ? items.find(x => x.id === id) : null;
   const it = {
     id: id || uid(), created: prev?.created || Date.now(), photos: formPhotos,
-    title: g('title'), description: g('description'), brand: g('brand'), size: g('size'), category: g('category'), condition: g('condition'),
+    title: g('title'), description: g('description'), listPrice: num(g('listPrice')), comps: g('comps'), brand: g('brand'), size: g('size'), category: g('category'), condition: g('condition'),
     origin: g('origin'), lot: g('lot'), buyPrice: num(g('buyPrice')), buyShip: num(g('buyShip')), dateBought: g('dateBought'),
     personal: f.get('personal') === 'on', status: g('status'), notes: g('notes'),
     sellPrice: num(g('sellPrice')), sellFees: num(g('sellFees')), dateSold: g('dateSold'), datePublished: prev?.datePublished || '',
@@ -472,28 +774,135 @@ async function guardarForm(id) {
   cerrarForm(); render(); toast('Guardado');
   cloudSync();
 }
-function cerrarForm() { $('#sheet').classList.add('hidden'); $('#sheet').innerHTML = ''; }
+function cerrarForm() { cancelarIA(); $('#sheet').classList.add('hidden'); $('#sheet').innerHTML = ''; }
+
+let iaPrev = null;    // texto que tenía el vendedor antes de generar, para poder recuperarlo
+let tasaUlt = null;   // última tasación de esta prenda
+let chatMsgs = [];    // mensajes del chat de esta prenda (solo mientras el formulario está abierto)
+let formId = null;
 
 async function accionIA() {
+  if (iaCtl) { toast('Espera a que termine la otra petición de la IA'); return; }
   const f = $('#frm'); const btn = $('#btnIA'); const note = $('#iaNote');
-  const ctx = { brand: f.brand.value, size: f.size.value, category: f.category.value, condition: f.condition.value };
-  btn.disabled = true; btn.textContent = 'Analizando fotos…'; note.innerHTML = '';
+  const ctx = { brand: f.brand.value, size: f.size.value, category: f.category.value, condition: f.condition.value, title: f.title.value, description: f.description.value };
+  const previo = { title: f.title.value, description: f.description.value };
+  iaCtl = new AbortController();
+  const t0 = Date.now(); let intento = '';
+  const pinta = () => { btn.textContent = `Analizando fotos… ${Math.round((Date.now() - t0) / 1000)} s${intento}`; };
+  btn.disabled = true; pinta();
+  note.innerHTML = '<div class="row" style="margin-top:6px"><button type="button" class="btn" data-act="iacancel">Cancelar</button></div>';
+  const tick = setInterval(pinta, 1000);
   try {
-    const r = await generarConIA(formPhotos, ctx);
+    const r = await generarConIA(formPhotos, ctx, iaCtl.signal, (n, max) => { intento = n > 1 ? ` · intento ${n} de ${max}` : ''; pinta(); });
+    if ($('#frm') !== f) return; // el formulario se cerró mientras tanto
+    note.innerHTML = '';
+    iaPrev = (previo.title.trim() || previo.description.trim()) ? previo : null;
     if (r.titulo) f.title.value = r.titulo;
     if (r.descripcion) f.description.value = r.descripcion;
     if (r.marca && !f.brand.value) f.brand.value = r.marca;
     if (r.categoria && !f.category.value) f.category.value = r.categoria;
     if (r.talla && !f.size.value) f.size.value = r.talla;
+    let html = '';
+    if (iaPrev) html += '<div class="row" style="margin-top:6px"><button type="button" class="btn" data-act="iaundo">↩ Volver a mi texto anterior</button></div>';
     if (r.precio_orientativo) {
       const margen = settings().margen;
       const c = num(f.buyPrice.value) + num(f.buyShip.value);
       const min = c > 0 ? ` Para ganar un ${margen}% sobre tu coste de ${eur(c)}, necesitarías venderla a partir de ${eur(c * (1 + margen / 100))}.` : '';
-      note.innerHTML = `<div class="hint">Precio orientativo de la IA: <b>${esc(r.precio_orientativo)}</b> (estimación general, no datos de mercado en tiempo real).${min}</div>`;
+      html += `<div class="hint">Precio orientativo de la IA: <b>${esc(r.precio_orientativo)}</b> (estimación general, no datos de mercado en tiempo real). Para algo más fino usa "Tasar con IA".${min}</div>`;
     }
+    note.innerHTML = html;
     toast('Listo. Revisa el texto antes de publicar.');
-  } catch (e) { toast(e.message || 'Error al generar'); }
-  btn.disabled = false; btn.textContent = '✨ Generar título y descripción con IA';
+  } catch (e) {
+    if ($('#frm') === f) {
+      if (e.code === 'cancelado') { note.innerHTML = ''; toast('Cancelado'); }
+      else note.innerHTML = `<div class="hint">${esc(e.message || 'Error al generar')}</div>`;
+    }
+  } finally {
+    clearInterval(tick); iaCtl = null;
+    if ($('#frm') === f) { btn.disabled = false; btn.textContent = '✨ Generar título y descripción con IA'; }
+  }
+}
+
+function deshacerIA() {
+  const f = $('#frm'); if (!f || !iaPrev) return;
+  f.title.value = iaPrev.title; f.description.value = iaPrev.description;
+  iaPrev = null; $('#iaNote').innerHTML = ''; toast('Texto anterior recuperado');
+}
+
+function pintarTasa(r, d) {
+  const box = $('#tasaBox'); if (!box) return;
+  const gan = d.coste > 0 ? `<p class="note">Si la vendes al recomendado, ganarías ${eur(r.rec - d.coste)} sobre tu coste de ${eur(d.coste)}${r.rec - d.coste < 0 ? ' (pérdida)' : ''}.</p>` : '';
+  const h = d.hist || { n: 0 };
+  const propio = h.n ? `<p class="note">Tus ventas anteriores de ${esc(d.brand)}: ${h.n} (mediana ${eur(h.mediana)}${h.dias !== null ? `, ~${h.dias} días en venderse` : ''}).</p>` : '';
+  const comps = d.comps.length ? `<p class="note">Anuncios parecidos que has anotado: ${d.comps.length} (mediana ${eur(d.medComps)}).</p>` : '';
+  box.innerHTML = `<div class="tasa">
+    <div class="tasa-cifras"><div><small>Mínimo</small><b>${eur(r.min)}</b></div><div class="rec"><small>Recomendado</small><b>${eur(r.rec)}</b></div><div><small>Máximo</small><b>${eur(r.max)}</b></div></div>
+    ${r.razon ? `<p>${esc(r.razon)}</p>` : ''}
+    ${r.consejos.length ? '<ul>' + r.consejos.map(c => `<li>${esc(c)}</li>`).join('') + '</ul>' : ''}
+    ${propio}${comps}${gan}
+    <div class="row"><button type="button" class="btn primary" data-act="usarprecio" data-v="${r.rec}">Usar ${eur(r.rec)} como precio de publicación</button></div>
+    <p class="note">Estimación de la IA${r.confianza ? ` (confianza ${esc(r.confianza)})` : ''}: no consulta precios de mercado en tiempo real. Cuantos más precios de anuncios parecidos anotes, más fiable.</p></div>`;
+}
+
+async function accionTasar() {
+  if (iaCtl) { toast('Espera a que termine la otra petición de la IA'); return; }
+  const f = $('#frm'); const btn = $('#btnTasa'); const box = $('#tasaBox');
+  if (!formPhotos.length) { toast('Añade al menos una foto para tasar'); return; }
+  const d = datosTasacion(f, formId);
+  iaCtl = new AbortController();
+  const t0 = Date.now(); let intento = '';
+  const pinta = () => { btn.textContent = `Tasando… ${Math.round((Date.now() - t0) / 1000)} s${intento}`; };
+  btn.disabled = true; pinta();
+  box.innerHTML = '<div class="row" style="margin-top:6px"><button type="button" class="btn" data-act="iacancel">Cancelar</button></div>';
+  const tick = setInterval(pinta, 1000);
+  try {
+    const r = await tasarConIA(formPhotos, d, iaCtl.signal, (n, max) => { intento = n > 1 ? ` · intento ${n} de ${max}` : ''; pinta(); });
+    if ($('#frm') !== f) return;
+    tasaUlt = r; pintarTasa(r, d);
+  } catch (e) {
+    if ($('#frm') === f) {
+      if (e.code === 'cancelado') { box.innerHTML = ''; toast('Cancelado'); }
+      else box.innerHTML = `<div class="hint">${esc(e.message || 'Error al tasar')}</div>`;
+    }
+  } finally {
+    clearInterval(tick); iaCtl = null;
+    if ($('#frm') === f) { btn.disabled = false; btn.textContent = '💶 Tasar con IA'; }
+  }
+}
+
+function pintarChat(pensando) {
+  const log = $('#chatLog'); if (!log) return;
+  const burbuja = m => `<div class="msg ${m.rol}">${esc(m.texto).replace(/\n/g, '<br>')}</div>`;
+  log.innerHTML = (chatMsgs.length ? chatMsgs.map(burbuja).join('') : '<p class="note">Pregunta lo que quieras sobre esta prenda: a cuánto subirla, cómo negociar, qué foto mejorar, cómo redactar una respuesta a un comprador…</p>') +
+    (pensando ? `<div class="msg ai"><i>${esc(pensando)}</i> <button type="button" class="btn" data-act="iacancel">Cancelar</button></div>` : '');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function enviarChat() {
+  const f = $('#frm'); const inp = $('#chatIn'); if (!f || !inp) return;
+  const texto = inp.value.trim(); if (!texto) return;
+  if (iaCtl) { toast('Espera a que termine la otra petición de la IA'); return; }
+  if (!formPhotos.length) { toast('Añade al menos una foto para hablar de la prenda'); return; }
+  chatMsgs.push({ rol: 'user', texto }); inp.value = '';
+  const d = datosTasacion(f, formId);
+  iaCtl = new AbortController();
+  const t0 = Date.now(); let intento = '';
+  const pinta = () => pintarChat(`Pensando… ${Math.round((Date.now() - t0) / 1000)} s${intento}`);
+  pinta(); const tick = setInterval(pinta, 1000);
+  const btn = $('#chatSend'); if (btn) btn.disabled = true;
+  try {
+    const r = await chatearConIA(formPhotos, d, tasaUlt, chatMsgs, iaCtl.signal, (n, max) => { intento = n > 1 ? ` · intento ${n} de ${max}` : ''; });
+    if ($('#frm') !== f) return;
+    chatMsgs.push({ rol: 'ai', texto: r });
+  } catch (e) {
+    if ($('#frm') === f) {
+      if (e.code === 'cancelado') { chatMsgs.pop(); inp.value = texto; toast('Cancelado'); }
+      else chatMsgs.push({ rol: 'ai', texto: '⚠️ ' + (e.message || 'Error') });
+    }
+  } finally {
+    clearInterval(tick); iaCtl = null;
+    if ($('#frm') === f) { pintarChat(); const b2 = $('#chatSend'); if (b2) b2.disabled = false; }
+  }
 }
 
 /* ========= Exportar / importar ========= */
@@ -505,7 +914,7 @@ function exportarExcel() {
   const filas = items.map(i => ({
     Título: i.title, Marca: i.brand, Talla: i.size, Categoría: i.category, Estado_prenda: i.condition, Origen: i.origin, Lote: i.lot,
     Precio_compra: num(i.buyPrice), Envío_compra: num(i.buyShip), Coste_total: coste(i), Fecha_compra: i.dateBought,
-    Estado: ESTADOS[i.status], Personal: i.personal ? 'Sí' : 'No', Fecha_publicado: i.datePublished,
+    Estado: ESTADOS[i.status], Precio_publicación: num(i.listPrice) || '', Personal: i.personal ? 'Sí' : 'No', Fecha_publicado: i.datePublished,
     Precio_venta: i.status === 'vendido' ? num(i.sellPrice) : '', Comisiones: i.status === 'vendido' ? num(i.sellFees) : '',
     Beneficio: i.status === 'vendido' ? beneficio(i) : '', Fecha_venta: i.dateSold, Notas: i.notes
   }));
@@ -745,7 +1154,16 @@ async function iniciarStream() {
 }
 function actualizarCam() {
   const c = $('#camCount'); if (c) c.textContent = `${formPhotos.length} de 8 fotos`;
-  const l = $('#camLast'); if (l) l.innerHTML = formPhotos.length ? `<img src="${formPhotos[formPhotos.length - 1]}" alt="">` : '';
+  const t = $('#camStrip');
+  if (t) {
+    t.innerHTML = formPhotos.map((p, k) => `<div class="camth"><img src="${p}" alt="Foto ${k + 1}"><button type="button" class="camx" data-act="camdel" data-k="${k}" aria-label="Borrar foto ${k + 1}">×</button></div>`).join('');
+    t.scrollLeft = t.scrollWidth; // la última foto siempre a la vista
+  }
+}
+function quitarFotoCam(k) {
+  if (!(k >= 0 && k < formPhotos.length)) return;
+  formPhotos.splice(k, 1);
+  pintarFotos(); actualizarCam();
 }
 async function abrirCamara() {
   if (formPhotos.length >= 8) { toast('Ya hay 8 fotos (el máximo)'); return; }
@@ -755,7 +1173,7 @@ async function abrirCamara() {
   d.id = 'cam'; d.className = 'cam';
   d.innerHTML = `<video id="camVideo" autoplay playsinline muted></video><div class="camflash" id="camFlash"></div>
     <div class="camtop"><span id="camCount"></span><button type="button" class="btn" data-act="camflip">🔄 Girar cámara</button></div>
-    <div class="cambar"><div class="camlast" id="camLast"></div><button type="button" class="shutter" data-act="camshot" aria-label="Hacer foto"></button><button type="button" class="btn primary" data-act="camdone">Listo</button></div>`;
+    <div class="cambottom"><div class="camstrip" id="camStrip"></div><div class="cambar"><span class="camspacer"></span><button type="button" class="shutter" data-act="camshot" aria-label="Hacer foto"></button><button type="button" class="btn primary" data-act="camdone">Listo</button></div></div>`;
   document.body.appendChild(d);
   actualizarCam();
   try { await iniciarStream(); }
@@ -782,7 +1200,7 @@ function hacerFoto() {
   pintarFotos(); actualizarCam();
   const f = $('#camFlash'); if (f) { f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 120); }
   if (navigator.vibrate) navigator.vibrate(25);
-  if (formPhotos.length >= 8) { cerrarCamara(); toast('Has llegado a 8 fotos'); }
+  if (formPhotos.length >= 8) toast('Has llegado a 8 fotos. Borra alguna con la × o pulsa Listo.');
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#cam')) cerrarCamara(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) cerrarCamara(); }); // al salir de la app, se apaga la cámara
@@ -915,6 +1333,12 @@ async function cerrarSesion() {
   render();
 }
 
+function guardarAjustes() {
+  const s = settings();
+  s.provider = $('#sProv').value; s.apiKey = $('#sKey').value.trim(); s.model = $('#sModel').value.trim() || DEF.model;
+  saveSettings(s); toast('Ajustes guardados');
+}
+
 /* ========= Eventos ========= */
 document.addEventListener('click', async e => {
   if (e.target.id === 'lb') { if (!crop) cerrarVisor(); return; } // clic en el fondo del visor
@@ -928,6 +1352,7 @@ document.addEventListener('click', async e => {
   else if (a === 'filtro') { filtro = el.dataset.v; render(); }
   else if (a === 'addmulti') abrirCamara();
   else if (a === 'camshot') hacerFoto();
+  else if (a === 'camdel') quitarFotoCam(+el.dataset.k);
   else if (a === 'camdone') cerrarCamara();
   else if (a === 'camflip') girarCamara();
   else if (a === 'addcam') $('#camIn').click();
@@ -969,11 +1394,19 @@ document.addEventListener('click', async e => {
   else if (a === 'ord') { orden = el.dataset.v; render(); }
   else if (a === 'xlsx') exportarExcel();
   else if (a === 'exportjson') exportarJSON();
-  else if (a === 'saveset') {
-    const s = settings();
-    s.provider = $('#sProv').value; s.apiKey = $('#sKey').value.trim(); s.model = $('#sModel').value.trim() || DEF.model;
-    saveSettings(s); toast('Ajustes guardados');
-  }
+  else if (a === 'saveset') guardarAjustes();
+  else if (a === 'testia') probarIA();
+  else if (a === 'usemodel') { $('#sModel').value = el.dataset.v; guardarAjustes(); probarIA(); }
+  else if (a === 'iacancel') cancelarIA();
+  else if (a === 'iaundo') deshacerIA();
+  else if (a === 'tasar') accionTasar();
+  else if (a === 'usarprecio') { const f = $('#frm'); if (f) { f.listPrice.value = el.dataset.v; toast('Precio de publicación puesto. Pulsa Guardar.'); } }
+  else if (a === 'chatopen') { const c = $('#chatPanel'); if (c) { c.classList.toggle('hidden'); if (!c.classList.contains('hidden')) { pintarChat(); const i = $('#chatIn'); if (i) i.focus(); } } }
+  else if (a === 'chatsend') enviarChat();
+  else if (a === 'chatclear') { if (!iaCtl) { chatMsgs = []; pintarChat(); } }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target && e.target.id === 'chatIn') { e.preventDefault(); enviarChat(); }
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'busca') {
