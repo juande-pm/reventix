@@ -55,7 +55,12 @@ async function dbClear() {
 }
 
 /* ========= Ajustes ========= */
-const DEF = { provider: 'gemini', apiKey: '', model: 'gemini-3.8-flash', margen: 100 };
+const PLANT_DEF = {
+  plantTitulo: '{tipo} {marca} - Talla {talla}',
+  plantArriba: 'Medidas:\nHombro a hombro: cm\nCuello hasta abajo: cm\n\nEnvío entre 24 y 48h!!',
+  plantAbajo: 'Medidas:\nCintura: cm\nLargo: cm\nTiro: cm\n\nEnvío entre 24 y 48h!!'
+};
+const DEF = { provider: 'gemini', apiKey: '', model: 'gemini-3.8-flash', margen: 100, ...PLANT_DEF };
 function settings() { try { return { ...DEF, ...JSON.parse(localStorage.getItem('rv_settings') || '{}') }; } catch { return { ...DEF }; } }
 function saveSettings(s) { localStorage.setItem('rv_settings', JSON.stringify(s)); }
 
@@ -691,7 +696,13 @@ function vistaAjustes() {
     <p class="note">La clave se guarda solo en este dispositivo y se envía directamente al proveedor. No la compartas. Si la IA tarda o falla, pulsa "Probar conexión": comprueba la clave, qué modelos puedes usar y cuánto tarda cada uno.</p>
     <div class="row"><button class="btn primary" data-act="saveset">Guardar ajustes</button><button class="btn" data-act="testia">Probar conexión</button></div>
     <div id="iaTest"></div></div>
-    <div class="card"><h3 style="margin-top:0">Copia de seguridad</h3>
+    <div class="card"><h3 style="margin-top:0">Plantillas de texto</h3>
+     <p class="note">Se usan con los botones "Plantilla…" del formulario. Puedes poner {tipo} (la categoría), {marca}, {talla} y {estado}; se sustituyen por lo que hayas rellenado. Se guardan solo en este dispositivo.</p>
+     <label>Plantilla de título</label><input type="text" id="sPT" value="${esc(s.plantTitulo)}">
+     <label>Plantilla de descripción: parte de arriba</label><textarea id="sPA" style="min-height:130px">${esc(s.plantArriba)}</textarea>
+     <label>Plantilla de descripción: parte de abajo</label><textarea id="sPB" style="min-height:130px">${esc(s.plantAbajo)}</textarea>
+     <div class="row"><button class="btn primary" data-act="saveplant">Guardar plantillas</button><button class="btn" data-act="resetplant">Restaurar las de ejemplo</button></div></div>
+     <div class="card"><h3 style="margin-top:0">Copia de seguridad</h3>
     <p class="note">Tus datos y fotos viven en este navegador. Si borras los datos del navegador o cambias de móvil, se pierden. Haz copias a menudo.</p>
     <div class="row"><button class="btn" data-act="exportjson">Descargar copia (.json)</button><label class="btn" style="margin:0;color:var(--ink);font-size:16px">Restaurar copia<input type="file" id="impJson" accept="application/json" hidden></label><button class="btn" data-act="xlsx">Exportar a Excel</button></div></div>
     <div class="card"><h3 style="margin-top:0">Acerca de</h3><p class="note">El precio que sugiere la IA es orientativo: no usa datos de mercado en tiempo real. Los gráficos y medias salen de tus propias ventas.</p></div>`;
@@ -717,6 +728,8 @@ function abrirForm(id) {
     <div class="grid2"><div><label>Categoría</label><input type="text" name="category" value="${esc(d.category)}" placeholder="Sudadera, vaqueros…"></div><div><label>Estado de la prenda</label><select name="condition">${sel(CONDICIONES, d.condition)}</select></div></div>
     <label>Título</label><input type="text" name="title" maxlength="100" value="${esc(d.title)}">
     <label>Descripción</label><textarea name="description">${esc(d.description)}</textarea>
+    <div class="row plantrow"><button type="button" class="btn" data-act="plant" data-v="plantTitulo">📝 Plantilla título</button><button type="button" class="btn" data-act="plant" data-v="plantArriba">👕 Plantilla parte de arriba</button><button type="button" class="btn" data-act="plant" data-v="plantAbajo">👖 Plantilla parte de abajo</button></div>
+    <p class="note">Plantillas por si la IA no funciona o prefieres tu propio texto. Se rellenan con la categoría, marca y talla de arriba y se configuran en Ajustes.</p>
     <div class="row"><button type="button" class="btn c-azul" data-act="copyt">Copiar título</button><button type="button" class="btn c-violeta" data-act="copyd">Copiar descripción</button><button type="button" class="btn c-verde" data-act="sharef">Enviar fotos a Vinted / galería</button><button type="button" class="btn c-naranja" data-act="dlf">Descargar fotos</button></div>
     <p class="note">Para publicar: copia título y descripción, y pasa las fotos con "Enviar fotos" (menú de compartir) o "Descargar fotos" (quedan en la carpeta Descargas). Toca una miniatura para verla en grande.</p>
     <h3>Precio</h3>
@@ -903,6 +916,38 @@ async function enviarChat() {
     clearInterval(tick); iaCtl = null;
     if ($('#frm') === f) { pintarChat(); const b2 = $('#chatSend'); if (b2) b2.disabled = false; }
   }
+}
+
+/* ========= Plantillas (para cuando no quieres o no puedes usar la IA) ========= */
+function rellenarPlantilla(texto, v) {
+  return String(texto || '').replace(/\{(tipo|marca|talla|estado)\}/gi, (_, k) => v[k.toLowerCase()] || '');
+}
+// Quita los huecos que quedan si falta algún dato ("Sudadera - Talla " → "Sudadera")
+function limpiarTitulo(t) {
+  t = String(t).replace(/[ \t]{2,}/g, ' ').trim()
+    .replace(/\s*[-–]\s*Talla\s*[-–]?\s*$/i, '').replace(/\s*[-–]\s*$/, '').replace(/^\s*[-–]\s*/, '').trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : t;
+}
+function aplicarPlantilla(clave) {
+  const f = $('#frm'); if (!f || !(clave in PLANT_DEF)) return;
+  const base = String(settings()[clave] || '');
+  if (!base.trim()) { toast('Esa plantilla está vacía. Configúrala en Ajustes.'); return; }
+  const esTitulo = clave === 'plantTitulo';
+  const campo = esTitulo ? f.title : f.description;
+  if (campo.value.trim() && !confirm(`Ya hay ${esTitulo ? 'un título' : 'una descripción'} escrito. ¿Reemplazarlo por la plantilla?`)) return;
+  const v = { tipo: f.category.value.trim(), marca: f.brand.value.trim(), talla: f.size.value.trim(), estado: f.condition.value.trim() };
+  const txt = rellenarPlantilla(base, v);
+  campo.value = esTitulo ? limpiarTitulo(txt).slice(0, 100) : txt;
+  toast(esTitulo && !v.tipo ? 'Plantilla puesta. Rellena la categoría (Sudadera, vaqueros…) para completar el título.' : 'Plantilla puesta');
+}
+function guardarPlantillas(restaurar) {
+  const s = settings();
+  for (const [k, id] of [['plantTitulo', '#sPT'], ['plantArriba', '#sPA'], ['plantAbajo', '#sPB']]) {
+    const n = $(id); if (!n) continue;
+    if (restaurar) n.value = PLANT_DEF[k];
+    s[k] = n.value;
+  }
+  saveSettings(s); toast(restaurar ? 'Plantillas restauradas' : 'Plantillas guardadas');
 }
 
 /* ========= Exportar / importar ========= */
@@ -1399,6 +1444,9 @@ document.addEventListener('click', async e => {
   else if (a === 'usemodel') { $('#sModel').value = el.dataset.v; guardarAjustes(); probarIA(); }
   else if (a === 'iacancel') cancelarIA();
   else if (a === 'iaundo') deshacerIA();
+  else if (a === 'plant') aplicarPlantilla(el.dataset.v);
+  else if (a === 'saveplant') guardarPlantillas(false);
+  else if (a === 'resetplant') { if (confirm('¿Volver a las plantillas de ejemplo? Se perderán tus cambios.')) guardarPlantillas(true); }
   else if (a === 'tasar') accionTasar();
   else if (a === 'usarprecio') { const f = $('#frm'); if (f) { f.listPrice.value = el.dataset.v; toast('Precio de publicación puesto. Pulsa Guardar.'); } }
   else if (a === 'chatopen') { const c = $('#chatPanel'); if (c) { c.classList.toggle('hidden'); if (!c.classList.contains('hidden')) { pintarChat(); const i = $('#chatIn'); if (i) i.focus(); } } }

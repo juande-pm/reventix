@@ -117,3 +117,4 @@ canvas{max-width:100%}
 .msg.user{margin-left:auto;background:var(--accent);color:var(--accent-ink)}
 .msg.ai{background:var(--line);color:var(--ink)}
 .chatrow{flex-wrap:nowrap}.chatrow input{flex:1;min-width:0}
+.plantrow .btn{flex:1 1 auto}
