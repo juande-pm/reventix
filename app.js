@@ -132,8 +132,8 @@ Reglas sobre ese texto del vendedor:
 {"titulo":"","descripcion":"","marca":"","categoria":"","talla":"","precio_orientativo":""}
 
 Reglas:
-- "titulo": máximo 60 caracteres, en español, con este orden aproximado: tipo de prenda + marca + color/rasgo clave + talla si se conoce.
-- "descripcion": en español, tono natural y cercano, párrafos cortos. Incluye tipo de prenda, marca, color, material y talla solo si se ven o se indican. Menciona el estado con honestidad. Termina con una línea de envío/oferta amable y 3-5 hashtags útiles.
+- "titulo": máximo 90 caracteres, en español, pensado para llamar la atención y aparecer en las búsquedas de Vinted. Formato: "<Tipo de prenda> <Marca> <color o rasgo clave> <2-4 palabras clave de estilo> - Talla <talla>" (la talla siempre al final, separada con un guion). Las palabras clave de estilo (por ejemplo Y2K, Vintage, Retro, Old Money, Gorpcore, 90s, Streetwear, Oversize, Deportivo) solo van si de verdad encajan con la prenda: no pongas etiquetas que no apliquen. Sin emojis, sin palabras enteras en MAYÚSCULAS y sin hashtags en el título. Si no se sabe la talla, no pongas el guion ni "Talla".
+- "descripcion": en español, tono natural y cercano, párrafos cortos. Incluye tipo de prenda, marca, color, material y talla solo si se ven o se indican. Menciona el estado con honestidad. Termina con una línea de envío/oferta amable y, en la última línea, 6-8 hashtags relevantes y buscables en minúsculas (marca, tipo de prenda, estilo o época; por ejemplo #adidas #sudadera #y2k #vintage #streetwear), sin repetir y solo los que apliquen a la prenda.
 - No inventes medidas, materiales ni marcas que no se vean en las fotos ni los haya escrito el vendedor. Si no estás seguro, omite el dato o déjalo en "".
 - "precio_orientativo": rango aproximado en euros (por ejemplo "12-18 €") según marca, tipo y estado. Es solo una estimación general, no datos de mercado en tiempo real.
 
@@ -712,7 +712,7 @@ function vistaAjustes() {
 function abrirForm(id) {
   const it = id ? items.find(x => x.id === id) : null;
   formPhotos = it ? [...(it.photos || [])] : [];
-  formId = id || null; iaPrev = null; tasaUlt = null; chatMsgs = [];
+  formId = id || null; iaPrev = null; tasaUlt = null; chatMsgs = []; mejoras = [];
   const d = it || { status: 'stock', condition: 'Muy bueno', origin: ORIGENES[0], dateBought: today(), personal: false };
   const sel = (arr, v) => arr.map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('');
   const sheet = $('#sheet');
@@ -722,6 +722,7 @@ function abrirForm(id) {
     <div class="photos" id="photos"></div>
     <input type="file" id="fileIn" accept="image/*" multiple hidden>
     <input type="file" id="camIn" accept="image/*" capture="environment" hidden>
+    <div class="row"><button type="button" class="btn" data-act="mejorarall">✨ Mejorar todas las fotos</button><button type="button" class="btn hidden" id="btnUndoMej" data-act="mejoraundo">↩ Deshacer mejora</button></div>
     <div class="row"><button type="button" class="btn primary" id="btnIA" data-act="ia">✨ Generar título y descripción con IA</button></div>
     <div id="iaNote"></div>
     <div class="grid2"><div><label>Marca</label><input type="text" name="brand" value="${esc(d.brand)}"></div><div><label>Talla</label><input type="text" name="size" value="${esc(d.size)}"></div></div>
@@ -765,6 +766,7 @@ function abrirForm(id) {
 function pintarFotos() {
   $('#photos').innerHTML = formPhotos.map((p, k) => `<div class="ph"><img src="${p}" alt="Foto ${k + 1}" data-act="verf" data-k="${k}" style="cursor:zoom-in"><button type="button" class="x" data-act="quitaf" data-k="${k}">×</button></div>`).join('') +
     (formPhotos.length < 8 ? `<div class="addph" data-act="addmulti">📸<br>Varias fotos</div><div class="addph" data-act="addcam">📷<br>Cámara</div><div class="addph" data-act="addgal">🖼️<br>Galería</div>` : '');
+  actualizarMejoraUI();
 }
 async function guardarForm(id) {
   const f = new FormData($('#frm'));
@@ -810,7 +812,7 @@ async function accionIA() {
     if ($('#frm') !== f) return; // el formulario se cerró mientras tanto
     note.innerHTML = '';
     iaPrev = (previo.title.trim() || previo.description.trim()) ? previo : null;
-    if (r.titulo) f.title.value = r.titulo;
+    if (r.titulo) f.title.value = normalizarTitulo(r.titulo, f.size.value || r.talla);
     if (r.descripcion) f.description.value = r.descripcion;
     if (r.marca && !f.brand.value) f.brand.value = r.marca;
     if (r.categoria && !f.category.value) f.category.value = r.categoria;
@@ -950,6 +952,107 @@ function guardarPlantillas(restaurar) {
   saveSettings(s); toast(restaurar ? 'Plantillas restauradas' : 'Plantillas guardadas');
 }
 
+/* ========= Título con talla separada ========= */
+const escRe = t => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Deja el título como "<texto> - Talla X" (máx. 100 caracteres), sin hashtags ni tallas repetidas
+function normalizarTitulo(t, talla) {
+  const fin = /[\s\-–—|,·:]+$/;
+  talla = String(talla || '').trim();
+  t = String(t || '').replace(/#\S+/g, '').replace(/\s{2,}/g, ' ').trim()
+    .replace(/(?:\s+|\s*[-–—|,·]\s*)\(?\btalla\b(?:[:\s]*\S{1,4})?\)?\s*$/i, '').replace(fin, '').trim();
+  if (talla) t = t.replace(new RegExp(`(?:\\s+|\\s*[-–—|,·]\\s*)(?:talla\\s*)?${escRe(talla)}\\s*$`, 'i'), '').replace(fin, '').trim();
+  if (!talla) return t.slice(0, 100).replace(fin, '');
+  const suf = ` - Talla ${talla}`;
+  return t.slice(0, Math.max(0, 100 - suf.length)).replace(fin, '') + suf;
+}
+
+/* ========= Mejorar fotos (en el propio dispositivo, sin enviar nada a internet) =========
+   Ajusta niveles y brillo sobre la luminosidad (así los colores de la prenda no cambian de tono),
+   sube un poco la viveza y afila ligeramente. No cambia el fondo ni toca la prenda. */
+function mejorarPixeles(d, w, h) {
+  const n = w * h, hist = new Uint32Array(256);
+  for (let i = 0; i < n; i++) { const p = i * 4; hist[(0.2126 * d[p] + 0.7152 * d[p + 1] + 0.0722 * d[p + 2]) | 0]++; }
+  const corte = n * 0.005; let lo = 0, hi = 255, a = 0;
+  for (let v = 0; v < 256; v++) { a += hist[v]; if (a > corte) { lo = v; break; } }
+  a = 0; for (let v = 255; v >= 0; v--) { a += hist[v]; if (a > corte) { hi = v; break; } }
+  if (hi - lo < 40) { const m = (hi + lo) / 2; lo = Math.max(0, m - 20); hi = Math.min(255, m + 20); }
+  let suma = 0; for (let v = 0; v < 256; v++) suma += hist[v] * Math.min(1, Math.max(0, (v - lo) / (hi - lo)));
+  const media = Math.min(0.9, Math.max(0.05, suma / n));
+  const gamma = Math.min(1.15, Math.max(0.7, Math.log(0.52) / Math.log(media)));
+  const lut = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lut[v] = 255 * Math.pow(Math.min(1, Math.max(0, (v - lo) / (hi - lo))), gamma);
+  const c = x => x < 0 ? 0 : x > 255 ? 255 : x;
+  for (let i = 0; i < n; i++) {
+    const p = i * 4, L = 0.2126 * d[p] + 0.7152 * d[p + 1] + 0.0722 * d[p + 2];
+    const T = lut[L | 0]; const k = L > 1 ? Math.min(3, T / L) : 1;
+    const r = d[p] * k, g = d[p + 1] * k, b = d[p + 2] * k, Lt = L > 1 ? T : L;
+    d[p] = c(Lt + (r - Lt) * 1.08); d[p + 1] = c(Lt + (g - Lt) * 1.08); d[p + 2] = c(Lt + (b - Lt) * 1.08);
+  }
+  // Afilado suave (unsharp mask con desenfoque 3×3)
+  const src = new Uint8ClampedArray(d);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const p = (y * w + x) * 4;
+    for (let ch = 0; ch < 3; ch++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += src[p + ch + (dy * w + dx) * 4];
+      d[p + ch] = c(src[p + ch] + 0.5 * (src[p + ch] - s / 9));
+    }
+  }
+  return { lo, hi, gamma };
+}
+async function mejorarFoto(src) {
+  const img = await cargarImg(src);
+  const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  mejorarPixeles(id.data, cv.width, cv.height);
+  ctx.putImageData(id, 0, 0);
+  return cv.toDataURL('image/jpeg', 0.88);
+}
+let mejoras = [];      // {orig, nueva}: para poder volver a la foto original
+let mejorando = false;
+function actualizarMejoraUI() {
+  const b = $('#btnUndoMej');
+  if (b) b.classList.toggle('hidden', !mejoras.some(m => formPhotos.includes(m.nueva)));
+}
+async function mejorarFotos(indices) {
+  if (mejorando) return;
+  const lista = indices.filter(k => formPhotos[k] && !mejoras.some(m => m.nueva === formPhotos[k]));
+  if (!lista.length) { toast(indices.length ? 'Ya está mejorada' : 'Añade fotos primero'); return; }
+  mejorando = true; toast(`Mejorando ${lista.length} foto(s)…`);
+  let hechas = 0;
+  try {
+    for (const k of lista) {
+      const orig = formPhotos[k];
+      try { const nueva = await mejorarFoto(orig); if (formPhotos[k] === orig) { formPhotos[k] = nueva; mejoras.push({ orig, nueva }); hechas++; } } catch { /* esa foto se queda como estaba */ }
+    }
+  } finally { mejorando = false; }
+  if ($('#photos')) pintarFotos();
+  actualizarMejoraUI();
+  toast(hechas ? `${hechas} foto(s) mejoradas. Pulsa Guardar en la prenda para conservar el cambio.` : 'No se pudo mejorar la foto');
+}
+function deshacerMejora(k) { // k opcional: solo esa foto
+  let n = 0;
+  formPhotos.forEach((p, i) => {
+    if (k !== undefined && i !== k) return;
+    const m = mejoras.find(x => x.nueva === p);
+    if (m) { formPhotos[i] = m.orig; n++; }
+  });
+  mejoras = mejoras.filter(m => formPhotos.includes(m.nueva));
+  if ($('#photos')) pintarFotos();
+  actualizarMejoraUI();
+  toast(n ? 'Fotos originales recuperadas' : 'No hay mejoras que deshacer');
+}
+async function mejorarVisor() {
+  const v = $('#lb'); if (!v || crop) return;
+  const k = +v.dataset.k; await mejorarFotos([k]); abrirVisor(k);
+}
+function originalVisor() {
+  const v = $('#lb'); if (!v || crop) return;
+  const k = +v.dataset.k; deshacerMejora(k); abrirVisor(k);
+}
+
 /* ========= Exportar / importar ========= */
 function descargar(blob, nombre) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nombre;
@@ -1036,7 +1139,7 @@ function abrirVisor(k) {
   const d = document.createElement('div');
   d.id = 'lb'; d.className = 'lb'; d.dataset.k = String(k);
   d.innerHTML = `<img src="${formPhotos[k]}" alt="Foto ${k + 1}"><div class="note" style="color:#ddd">Foto ${k + 1} de ${n}</div>
-    <div class="bar"><button type="button" class="btn" data-act="lbrotl">↺ Girar</button><button type="button" class="btn" data-act="lbrotr">↻ Girar</button><button type="button" class="btn" data-act="lbcrop">✂ Recortar</button></div>
+    <div class="bar"><button type="button" class="btn" data-act="lbrotl">↺ Girar</button><button type="button" class="btn" data-act="lbrotr">↻ Girar</button><button type="button" class="btn" data-act="lbcrop">✂ Recortar</button>${mejoras.some(m => m.nueva === formPhotos[k]) ? '<button type="button" class="btn" data-act="lboriginal">↩ Original</button>' : '<button type="button" class="btn" data-act="lbmejorar">✨ Mejorar</button>'}</div>
     <div class="bar">${n > 1 ? '<button type="button" class="btn" data-act="lbprev">‹ Anterior</button><button type="button" class="btn" data-act="lbnext">Siguiente ›</button>' : ''}<button type="button" class="btn primary" data-act="lbdl">Descargar esta foto</button><button type="button" class="btn" data-act="lbclose">Cerrar</button></div>`;
   document.body.appendChild(d);
 }
@@ -1414,6 +1517,10 @@ document.addEventListener('click', async e => {
   else if (a === 'lbrotl') rotarVisor(-90);
   else if (a === 'lbrotr') rotarVisor(90);
   else if (a === 'lbcrop') abrirRecorte(+$('#lb').dataset.k);
+  else if (a === 'lbmejorar') mejorarVisor();
+  else if (a === 'lboriginal') originalVisor();
+  else if (a === 'mejorarall') mejorarFotos(formPhotos.map((_, k) => k));
+  else if (a === 'mejoraundo') deshacerMejora();
   else if (a === 'cropr') ratioCrop(el.dataset.v);
   else if (a === 'cropok') aplicarRecorte();
   else if (a === 'cropno') cancelarRecorte();
