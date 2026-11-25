@@ -722,7 +722,6 @@ function abrirForm(id) {
     <div class="photos" id="photos"></div>
     <input type="file" id="fileIn" accept="image/*" multiple hidden>
     <input type="file" id="camIn" accept="image/*" capture="environment" hidden>
-    <div class="row"><button type="button" class="btn" data-act="mejorarall">✨ Mejorar todas las fotos</button><button type="button" class="btn hidden" id="btnUndoMej" data-act="mejoraundo">↩ Deshacer mejora</button></div>
     <div class="row"><button type="button" class="btn primary" id="btnIA" data-act="ia">✨ Generar título y descripción con IA</button></div>
     <div id="iaNote"></div>
     <div class="grid2"><div><label>Marca</label><input type="text" name="brand" value="${esc(d.brand)}"></div><div><label>Talla</label><input type="text" name="size" value="${esc(d.size)}"></div></div>
@@ -1519,8 +1518,6 @@ document.addEventListener('click', async e => {
   else if (a === 'lbcrop') abrirRecorte(+$('#lb').dataset.k);
   else if (a === 'lbmejorar') mejorarVisor();
   else if (a === 'lboriginal') originalVisor();
-  else if (a === 'mejorarall') mejorarFotos(formPhotos.map((_, k) => k));
-  else if (a === 'mejoraundo') deshacerMejora();
   else if (a === 'cropr') ratioCrop(el.dataset.v);
   else if (a === 'cropok') aplicarRecorte();
   else if (a === 'cropno') cancelarRecorte();
